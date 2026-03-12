@@ -92,6 +92,7 @@
         const IconForward = () => <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>;
         const IconClipboard = () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect></svg>;
         const IconHome = () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>;
+        const IconMapPin = () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>;
 
         function App() {
             const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -243,13 +244,8 @@
                             {activeTab === 'branches' && <BranchesView branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'branch', mode:'add'})} onEdit={(d)=>setModal({type:'branch', mode:'edit', data:d})} />}
                             {activeTab === 'patients' && <PatientsView patients={filteredData.patients} branches={data.branches} currentUser={currentUser} branchId={currentUser.branchId} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'patient', mode:'add'})} onEdit={(d)=>setModal({type:'patient', mode:'edit', data:d})} />}
                             {activeTab === 'appointments' && <AppointmentsView apps={filteredData.appointments} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} setConfirm={setConfirmAction} onAdd={()=>setModal({type:'app', mode:'add'})} onEdit={(d)=>setModal({type:'app', mode:'edit', data:d})} onNav={navigateTo}/>}
-                            
-                            {/* تم تعديل التوريدات لتكون أزرار التعديل والحذف مرئية دائماً على الموبايل */}
                             {activeTab === 'finance' && isSuperAdmin && <FinanceView payments={filteredData.payments} branches={data.branches} currentUser={currentUser} setConfirm={setConfirmAction} onAdd={()=>setModal({type:'payment', mode:'add'})} onEdit={(d)=>setModal({type:'payment', mode:'edit', data:d})} />}
-                            
                             {activeTab === 'staff' && isSuperAdmin && <StaffView staff={data.staff} branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'staff', mode:'add'})} onEdit={(d)=>setModal({type:'staff', mode:'edit', data:d})} />}
-                            
-                            {/* تم تمرير دالة onEdit لقسم النواقص لتفعيل زر التعديل */}
                             {activeTab === 'shortages' && <ShortagesView shortages={filteredData.shortages} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onEdit={(d)=>setModal({type:'shortage', mode:'edit', data:d})} />}
                         </div>
                     </div>
@@ -257,7 +253,7 @@
             );
         }
 
-        // --- شاشة الدخول ---
+        // --- شاشة الدخول مع ميزة تذكرني ---
         function LoginView({ onLogin, staffData }) {
             const [code, setCode] = useState(['', '', '', '']);
             const [rememberMe, setRememberMe] = useState(true);
@@ -346,7 +342,6 @@
             );
         }
 
-        // --- قسم النواقص (مع زرار التعديل الجديد) ---
         function ShortagesView({ shortages, branches, currentUser, selectedBranch, onConfirm, onEdit }) {
             const [itemName, setItemName] = useState('');
             const [quantity, setQuantity] = useState('');
@@ -431,7 +426,6 @@
                                                             </div>
                                                         </div>
                                                         
-                                                        {/* إضافة زر التعديل للنواقص */}
                                                         <div className="flex items-center gap-1.5 w-full sm:w-auto">
                                                             <button onClick={() => onEdit(item)} className="bg-white text-gold-500 hover:bg-gold-500 hover:text-white p-1.5 rounded-lg border border-gray-200 transition-colors">
                                                                 <IconEdit />
@@ -630,14 +624,21 @@
                     <div className="flex justify-between items-center"><h3 className="text-lg font-black text-gray-800">إدارة الفروع</h3><button onClick={onAdd} className="bg-gold-500 text-white px-4 py-1.5 rounded-xl text-xs font-bold shadow-md hover:bg-gold-600">+ فرع جديد</button></div>
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                         {branches.map(b => (
-                            <div key={b.id} className="bg-white p-4 rounded-[20px] border border-gray-100 shadow-sm relative group">
-                                {/* زراير التعديل للفروع دايما ظاهرة للموبايل */}
+                            <div key={b.id} className="bg-white p-4 rounded-[20px] border border-gray-100 shadow-sm relative group flex flex-col h-full">
                                 <div className="absolute top-2 left-2 flex gap-1">
                                     <button onClick={() => onEdit(b)} className="p-1.5 text-gold-500 bg-white border border-gray-200 rounded-lg hover:bg-gold-500 hover:text-white transition-colors"><IconEdit/></button>
                                     <button onClick={() => onConfirm({msg:'حذف الفرع؟', onConfirm:()=>{db.collection('branches').doc(b.id).delete(); onConfirm(null);}})} className="p-1.5 text-red-500 bg-white border border-gray-200 rounded-lg hover:bg-red-500 hover:text-white transition-colors"><IconTrash/></button>
                                 </div>
                                 <div className="text-gold-500 mb-2 bg-gray-50 w-10 h-10 rounded-xl flex items-center justify-center"><IconBuilding/></div>
-                                <h4 className="text-sm font-black text-gray-800 mb-0.5">{b.name}</h4><p className="text-[10px] font-bold text-gray-500">{b.phone}</p>
+                                <h4 className="text-sm font-black text-gray-800 mb-0.5">{b.name}</h4>
+                                <p className="text-[10px] font-bold text-gray-500 mb-1">{b.phone}</p>
+                                {b.address && <p className="text-[9px] text-gray-400 mb-2 truncate" title={b.address}>{b.address}</p>}
+                                
+                                {b.mapsLink && (
+                                    <a href={b.mapsLink} target="_blank" rel="noreferrer" className="inline-flex w-fit items-center gap-1 text-[9px] font-bold bg-blue-50 text-blue-600 px-2 py-1 rounded-lg hover:bg-blue-100 transition-colors mt-auto border border-blue-100">
+                                        <IconMapPin /> عرض على الخريطة
+                                    </a>
+                                )}
                             </div>
                         ))}
                     </div>
@@ -669,7 +670,6 @@
             );
         }
 
-        // --- المالية (زراير التعديل والحذف ظاهرة دايماً) ---
         function FinanceView({ payments, branches, currentUser, onConfirm, onAdd, onEdit }) {
             const total = payments.reduce((a,b)=>a+Number(b.amount||0),0);
             return (
@@ -682,7 +682,6 @@
                     <div className="bg-white p-3 rounded-[20px] border border-gray-100 shadow-sm space-y-2">
                         {payments.sort((a,b)=>(b.date||'').localeCompare(a.date||'')).map(p=>(
                             <div key={p.id} className="flex justify-between items-center p-4 bg-gray-50 rounded-xl relative hover:bg-gray-100 transition-colors">
-                                {/* الزراير ظاهرة دايماً بدون Hover للموبايل */}
                                 <div className="absolute left-2 top-2 flex gap-1">
                                     <button onClick={() => onEdit(p)} className="p-1 text-gold-500 bg-white border border-gray-200 rounded-lg hover:bg-gold-500 hover:text-white transition-colors"><IconEdit/></button>
                                     <button onClick={() => onConfirm({msg:'حذف التوريد؟', onConfirm:()=>{db.collection('payments').doc(p.id).delete(); onConfirm(null);}})} className="p-1 text-red-500 bg-white border border-gray-200 rounded-lg hover:bg-red-500 hover:text-white transition-colors"><IconTrash/></button>
@@ -741,6 +740,7 @@
             );
         }
 
+        // تم إضافة السكرول الخاص بالنافذة (حل مشكلة الكيبورد)
         function DataModal({ modal, branches, user, selectedBranch, onClose }) {
             const save = (e) => {
                 e.preventDefault();
@@ -756,9 +756,8 @@
                 } else if(modal.type==='payment') {
                     col='payments'; d={amount:f.amt.value, date:f.dt.value, branchId:f.bId.value, receivedBy:user.name, paymentMethod: f.payMethod.value};
                 } else if(modal.type==='branch') {
-                    col='branches'; d={name:f.name.value, phone:f.phone.value};
+                    col='branches'; d={name:f.name.value, phone:f.phone.value, address: f.address.value, mapsLink: f.mapsLink.value};
                 } else if(modal.type==='shortage') {
-                    // منطق حفظ وتعديل النواقص
                     col='shortages'; d={itemName:f.itemName.value, quantity:f.quantity.value, branchId:f.bId.value};
                     if(modal.mode !== 'edit') { d.requestedBy = user.name; d.timestamp = new Date().toISOString(); }
                 }
@@ -769,101 +768,104 @@
             };
 
             return (
-                <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[99999] flex items-end sm:items-center justify-center p-4 animate-fade-in">
-                    <div className="bg-white w-full max-w-md rounded-[20px] shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-slide-up border border-gray-100">
-                        <div className="p-4 border-b flex justify-between items-center bg-gray-50/50 shrink-0">
-                            <h3 className="font-black text-gray-800 text-sm">إضافة / تعديل</h3>
-                            <button type="button" onClick={onClose} className="p-1.5 text-gray-400 bg-white rounded-full shadow-sm hover:text-gold-500 transition-colors"><IconX/></button>
-                        </div>
-                        <form onSubmit={save} className="p-5 space-y-3 overflow-y-auto custom-scrollbar">
-                            {modal.type==='app' && (
-                                <>
-                                    <Input name="pName" label="اسم المريض" defaultValue={modal.data?.patientName} required />
-                                    <Input name="phone" label="رقم الموبايل" defaultValue={modal.data?.phone} type="tel" required />
-                                    <div className="grid grid-cols-2 gap-2">
-                                        <Input name="dt" label="التاريخ" type="date" defaultValue={modal.data?.date || new Date().toISOString().split('T')[0]} required />
-                                        <Input name="tm" label="الوقت" type="time" defaultValue={modal.data?.time} required />
-                                    </div>
-                                    <Input name="service" label="الخدمة (اختياري)" defaultValue={modal.data?.service} />
-                                    <div className="space-y-1">
-                                        <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الفرع</label>
-                                        <select name="bId" defaultValue={modal.data?.branchId || user.branchId} disabled={user.role === 'employee'} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
-                                            {branches.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}
-                                        </select>
-                                    </div>
-                                </>
-                            )}
-                            {modal.type==='patient' && (
-                                <>
-                                    <div className="grid grid-cols-2 gap-2">
-                                        <Input name="fileNo" label="رقم الملف" defaultValue={modal.data?.fileNo} required />
-                                        <Input name="name" label="الاسم الكامل" defaultValue={modal.data?.name} required />
-                                    </div>
-                                    <Input name="phone" label="رقم الهاتف" defaultValue={modal.data?.phone} type="tel" required />
-                                    <Input name="service" label="الخدمة" defaultValue={modal.data?.service} />
-                                    {(user.role === 'admin' || user.role === 'superadmin') && (
+                <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[99999] overflow-y-auto animate-fade-in custom-scrollbar">
+                    <div className="flex min-h-full items-end sm:items-center justify-center p-4 pb-32">
+                        <div className="bg-white w-full max-w-md rounded-[20px] shadow-2xl flex flex-col animate-slide-up border border-gray-100 mt-8">
+                            <div className="p-4 border-b flex justify-between items-center bg-gray-50/50 shrink-0 rounded-t-[20px] sticky top-0 z-10">
+                                <h3 className="font-black text-gray-800 text-sm">إضافة / تعديل</h3>
+                                <button type="button" onClick={onClose} className="p-1.5 text-gray-400 bg-white rounded-full shadow-sm hover:text-gold-500 transition-colors"><IconX/></button>
+                            </div>
+                            <form onSubmit={save} className="p-5 space-y-4">
+                                {modal.type==='app' && (
+                                    <>
+                                        <Input name="pName" label="اسم المريض" defaultValue={modal.data?.patientName} required />
+                                        <Input name="phone" label="رقم الموبايل" defaultValue={modal.data?.phone} type="tel" required />
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <Input name="dt" label="التاريخ" type="date" defaultValue={modal.data?.date || new Date().toISOString().split('T')[0]} required />
+                                            <Input name="tm" label="الوقت" type="time" defaultValue={modal.data?.time} required />
+                                        </div>
+                                        <Input name="service" label="الخدمة (اختياري)" defaultValue={modal.data?.service} />
                                         <div className="space-y-1">
                                             <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الفرع</label>
-                                            <select name="bId" defaultValue={modal.data?.branchId || (selectedBranch !== 'all' ? selectedBranch : '')} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
+                                            <select name="bId" defaultValue={modal.data?.branchId || user.branchId} disabled={user.role === 'employee'} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
                                                 {branches.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}
                                             </select>
                                         </div>
-                                    )}
-                                </>
-                            )}
-                            {modal.type==='payment' && (
-                                <>
-                                    <Input name="amt" label="المبلغ" type="number" defaultValue={modal.data?.amount} required />
-                                    <Input name="dt" label="التاريخ" type="date" defaultValue={modal.data?.date || new Date().toISOString().split('T')[0]} required />
-                                    <Input name="payMethod" label="مكان الحفظ (اختياري)" defaultValue={modal.data?.paymentMethod} placeholder="كاش، فيزا..." />
-                                    <div className="space-y-1">
-                                        <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الفرع</label>
-                                        <select name="bId" defaultValue={modal.data?.branchId || user.branchId} disabled={user.role==='employee'} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
-                                            {branches.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}
-                                        </select>
-                                    </div>
-                                </>
-                            )}
-                            {/* تعديل النواقص */}
-                            {modal.type==='shortage' && (
-                                <>
-                                    <Input name="itemName" label="اسم الصنف" defaultValue={modal.data?.itemName} required />
-                                    <Input name="quantity" label="الكمية" defaultValue={modal.data?.quantity} required />
-                                    {(user.role === 'admin' || user.role === 'superadmin') && (
+                                    </>
+                                )}
+                                {modal.type==='patient' && (
+                                    <>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <Input name="fileNo" label="رقم الملف" defaultValue={modal.data?.fileNo} required />
+                                            <Input name="name" label="الاسم الكامل" defaultValue={modal.data?.name} required />
+                                        </div>
+                                        <Input name="phone" label="رقم الهاتف" defaultValue={modal.data?.phone} type="tel" required />
+                                        <Input name="service" label="الخدمة" defaultValue={modal.data?.service} />
+                                        {(user.role === 'admin' || user.role === 'superadmin') && (
+                                            <div className="space-y-1">
+                                                <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الفرع</label>
+                                                <select name="bId" defaultValue={modal.data?.branchId || (selectedBranch !== 'all' ? selectedBranch : '')} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
+                                                    {branches.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}
+                                                </select>
+                                            </div>
+                                        )}
+                                    </>
+                                )}
+                                {modal.type==='payment' && (
+                                    <>
+                                        <Input name="amt" label="المبلغ" type="number" defaultValue={modal.data?.amount} required />
+                                        <Input name="dt" label="التاريخ" type="date" defaultValue={modal.data?.date || new Date().toISOString().split('T')[0]} required />
+                                        <Input name="payMethod" label="مكان الحفظ (اختياري)" defaultValue={modal.data?.paymentMethod} placeholder="كاش، فيزا..." />
                                         <div className="space-y-1">
-                                            <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الفرع / المخزن</label>
-                                            <select name="bId" defaultValue={modal.data?.branchId} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
-                                                <option value="store">المخزن (الرئيسي)</option>
+                                            <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الفرع</label>
+                                            <select name="bId" defaultValue={modal.data?.branchId || user.branchId} disabled={user.role==='employee'} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
                                                 {branches.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}
                                             </select>
                                         </div>
-                                    )}
-                                    {user.role === 'employee' && (
-                                        <input type="hidden" name="bId" value={modal.data?.branchId || user.branchId} />
-                                    )}
-                                </>
-                            )}
-                            {modal.type==='staff' && (
-                                <>
-                                    <Input name="name" label="اسم الموظف" defaultValue={modal.data?.name} required />
-                                    <Input name="code" label="كود الدخول (4 أرقام)" defaultValue={modal.data?.code} type="tel" maxLength="4" required />
-                                    <div className="space-y-1">
-                                        <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الصلاحية</label>
-                                        <select name="bId" defaultValue={modal.data?.branchId || 'all'} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
-                                            <option value="all">مدير عام (جميع الفروع)</option>
-                                            {branches.map(b=><option key={b.id} value={b.id}>موظف فرع: {b.name}</option>)}
-                                        </select>
-                                    </div>
-                                </>
-                            )}
-                            {modal.type==='branch' && (
-                                <>
-                                    <Input name="name" label="اسم الفرع" defaultValue={modal.data?.name} required />
-                                    <Input name="phone" label="تليفون الفرع" defaultValue={modal.data?.phone} required />
-                                </>
-                            )}
-                            <button type="submit" className="w-full py-3 mt-2 bg-gold-500 text-white rounded-xl font-black shadow-md hover:bg-gold-600 transition-colors">حفظ التغييرات</button>
-                        </form>
+                                    </>
+                                )}
+                                {modal.type==='shortage' && (
+                                    <>
+                                        <Input name="itemName" label="اسم الصنف" defaultValue={modal.data?.itemName} required />
+                                        <Input name="quantity" label="الكمية" defaultValue={modal.data?.quantity} required />
+                                        {(user.role === 'admin' || user.role === 'superadmin') && (
+                                            <div className="space-y-1">
+                                                <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الفرع / المخزن</label>
+                                                <select name="bId" defaultValue={modal.data?.branchId} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
+                                                    <option value="store">المخزن (الرئيسي)</option>
+                                                    {branches.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}
+                                                </select>
+                                            </div>
+                                        )}
+                                        {user.role === 'employee' && (
+                                            <input type="hidden" name="bId" value={modal.data?.branchId || user.branchId} />
+                                        )}
+                                    </>
+                                )}
+                                {modal.type==='staff' && (
+                                    <>
+                                        <Input name="name" label="اسم الموظف" defaultValue={modal.data?.name} required />
+                                        <Input name="code" label="كود الدخول (4 أرقام)" defaultValue={modal.data?.code} type="tel" maxLength="4" required />
+                                        <div className="space-y-1">
+                                            <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الصلاحية</label>
+                                            <select name="bId" defaultValue={modal.data?.branchId || 'all'} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
+                                                <option value="all">مدير عام (جميع الفروع)</option>
+                                                {branches.map(b=><option key={b.id} value={b.id}>موظف فرع: {b.name}</option>)}
+                                            </select>
+                                        </div>
+                                    </>
+                                )}
+                                {modal.type==='branch' && (
+                                    <>
+                                        <Input name="name" label="اسم الفرع" defaultValue={modal.data?.name} required />
+                                        <Input name="phone" label="تليفون الفرع" defaultValue={modal.data?.phone} required />
+                                        <Input name="address" label="العنوان التفصيلي" defaultValue={modal.data?.address} placeholder="مثال: شارع مصطفى النحاس، المنيا" />
+                                        <Input name="mapsLink" label="رابط جوجل مابس (Google Maps)" defaultValue={modal.data?.mapsLink} placeholder="https://maps.app.goo.gl/..." dir="ltr" />
+                                    </>
+                                )}
+                                <button type="submit" className="w-full py-4 mt-6 bg-gold-500 text-white rounded-xl font-black shadow-lg hover:bg-gold-600 transition-colors text-sm">حفظ التغييرات</button>
+                            </form>
+                        </div>
                     </div>
                 </div>
             );
@@ -883,3 +885,6 @@
     </script>
 </body>
 </html>
+
+
+
