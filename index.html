@@ -93,6 +93,7 @@
         const IconClipboard = () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect></svg>;
         const IconHome = () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>;
         const IconMapPin = () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>;
+        const IconCheck = () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>;
 
         function App() {
             const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -109,6 +110,7 @@
             
             const [modal, setModal] = useState(null);
             const [confirmAction, setConfirmAction] = useState(null);
+            const [toastMsg, setToastMsg] = useState(null);
 
             // دوال التنقل
             const navigateTo = (tab) => {
@@ -123,28 +125,38 @@
             const goBack = () => { if (currentIndex > 0) setCurrentIndex(currentIndex - 1); };
             const goForward = () => { if (currentIndex < history.length - 1) setCurrentIndex(currentIndex + 1); };
 
-            // الجلب والحذف التلقائي للمواعيد القديمة
+            // الجلب الآمن
             useEffect(() => {
-                auth.signInAnonymously().catch(err => console.log(err));
-                const unsub1 = db.collection('branches').onSnapshot(s => setData(d => ({...d, branches: s.docs.map(x => ({id: x.id, ...x.data()}))})));
-                const unsub2 = db.collection('staff_members').onSnapshot(s => setData(d => ({...d, staff: s.docs.map(x => ({id: x.id, ...x.data()}))})));
-                const unsub3 = db.collection('patients').onSnapshot(s => setData(d => ({...d, patients: s.docs.map(x => ({id: x.id, ...x.data()}))})));
-                
-                const unsub4 = db.collection('appointments').onSnapshot(s => {
-                    const appsData = s.docs.map(x => ({id: x.id, ...x.data()}));
-                    const oneMonthAgo = new Date();
-                    oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
-                    const cutoffDate = oneMonthAgo.toISOString().split('T')[0];
-                    appsData.forEach(app => {
-                        if (app.date && app.date < cutoffDate) {
-                            db.collection('appointments').doc(app.id).delete().catch(()=>console.log("Cleanup Error"));
-                        }
-                    });
-                    setData(d => ({...d, appointments: appsData.filter(a => !(a.date && a.date < cutoffDate))}));
+                auth.signInAnonymously().catch(err => {
+                    console.error("Auth Error:", err);
+                    setToastMsg("مشكلة في الاتصال بالفايربيز: " + err.message);
                 });
-
-                const unsub5 = db.collection('payments').onSnapshot(s => setData(d => ({...d, payments: s.docs.map(x => ({id: x.id, ...x.data()}))})));
-                const unsub6 = db.collection('shortages').onSnapshot(s => setData(d => ({...d, shortages: s.docs.map(x => ({id: x.id, ...x.data()}))})));
+                
+                const unsub1 = db.collection('branches').onSnapshot(
+                    s => setData(d => ({...d, branches: s.docs.map(x => ({id: x.id, ...x.data()}))})),
+                    err => console.error(err)
+                );
+                const unsub2 = db.collection('staff_members').onSnapshot(
+                    s => setData(d => ({...d, staff: s.docs.map(x => ({id: x.id, ...x.data()}))})),
+                    err => console.error(err)
+                );
+                const unsub3 = db.collection('patients').onSnapshot(
+                    s => setData(d => ({...d, patients: s.docs.map(x => ({id: x.id, ...x.data()}))})),
+                    err => console.error(err)
+                );
+                const unsub4 = db.collection('appointments').onSnapshot(
+                    s => setData(d => ({...d, appointments: s.docs.map(x => ({id: x.id, ...x.data()}))})),
+                    err => console.error(err)
+                );
+                const unsub5 = db.collection('payments').onSnapshot(
+                    s => setData(d => ({...d, payments: s.docs.map(x => ({id: x.id, ...x.data()}))})),
+                    err => console.error(err)
+                );
+                const unsub6 = db.collection('shortages').onSnapshot(
+                    s => setData(d => ({...d, shortages: s.docs.map(x => ({id: x.id, ...x.data()}))})),
+                    err => console.error(err)
+                );
+                
                 return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); unsub6(); };
             }, []);
 
@@ -185,8 +197,18 @@
 
             return (
                 <div className="flex h-screen overflow-hidden text-gray-800 bg-[#FDFCFB] relative">
+                    {/* التوست ورسائل التأكيد */}
+                    {toastMsg && <Toast msg={toastMsg} onClose={() => setToastMsg(null)} />}
                     {confirmAction && <ConfirmModal action={confirmAction} onClose={()=>setConfirmAction(null)} />}
-                    {modal && <DataModal modal={modal} branches={data.branches} user={currentUser} selectedBranch={selectedBranch} onClose={()=>setModal(null)} />}
+                    {modal && <DataModal modal={modal} branches={data.branches} user={currentUser} selectedBranch={selectedBranch} onClose={()=>setModal(null)} showToast={setToastMsg} />}
+
+                    {/* Overlay للطبقة الشفافة عشان تقفل القايمة الجانبية لما تدوس بره */}
+                    {isSidebarOpen && (
+                        <div 
+                            className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40 lg:hidden animate-fade-in" 
+                            onClick={() => setIsSidebarOpen(false)}
+                        ></div>
+                    )}
 
                     {/* القائمة الجانبية */}
                     <div className={`fixed inset-y-0 right-0 z-50 bg-white border-l border-gold-400 shadow-2xl transition-transform duration-300 transform ${isSidebarOpen ? 'translate-x-0' : 'translate-x-full'} lg:relative lg:translate-x-0 w-72 h-full flex flex-col`}>
@@ -207,7 +229,7 @@
 
                     {/* المحتوى الرئيسي */}
                     <div className="flex-1 flex flex-col h-full w-full overflow-hidden">
-                        <header className="h-16 md:h-20 bg-white/90 border-b border-gray-200 px-3 sm:px-6 flex items-center justify-between z-40 shrink-0 shadow-sm">
+                        <header className="h-16 md:h-20 bg-white/90 border-b border-gray-200 px-3 sm:px-6 flex items-center justify-between z-30 shrink-0 shadow-sm relative">
                             <div className="flex items-center gap-1 sm:gap-3">
                                 <button onClick={() => setIsSidebarOpen(true)} className="p-2 text-gray-700 hover:text-gold-500 rounded-lg lg:hidden"><IconMenu/></button>
                                 
@@ -241,19 +263,18 @@
 
                         <div className="flex-1 p-3 md:p-8 overflow-y-auto w-full custom-scrollbar pb-20">
                             {activeTab === 'dashboard' && <DashboardStats data={filteredData} userRole={currentUser.role} onNav={navigateTo} />}
-                            {activeTab === 'branches' && <BranchesView branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'branch', mode:'add'})} onEdit={(d)=>setModal({type:'branch', mode:'edit', data:d})} />}
-                            {activeTab === 'patients' && <PatientsView patients={filteredData.patients} branches={data.branches} currentUser={currentUser} branchId={currentUser.branchId} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'patient', mode:'add'})} onEdit={(d)=>setModal({type:'patient', mode:'edit', data:d})} />}
-                            {activeTab === 'appointments' && <AppointmentsView apps={filteredData.appointments} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} setConfirm={setConfirmAction} onAdd={()=>setModal({type:'app', mode:'add'})} onEdit={(d)=>setModal({type:'app', mode:'edit', data:d})} onNav={navigateTo}/>}
-                            {activeTab === 'finance' && isSuperAdmin && <FinanceView payments={filteredData.payments} branches={data.branches} currentUser={currentUser} setConfirm={setConfirmAction} onAdd={()=>setModal({type:'payment', mode:'add'})} onEdit={(d)=>setModal({type:'payment', mode:'edit', data:d})} />}
-                            {activeTab === 'staff' && isSuperAdmin && <StaffView staff={data.staff} branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'staff', mode:'add'})} onEdit={(d)=>setModal({type:'staff', mode:'edit', data:d})} />}
-                            {activeTab === 'shortages' && <ShortagesView shortages={filteredData.shortages} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onEdit={(d)=>setModal({type:'shortage', mode:'edit', data:d})} />}
+                            {activeTab === 'branches' && <BranchesView branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'branch', mode:'add'})} onEdit={(d)=>setModal({type:'branch', mode:'edit', data:d})} showToast={setToastMsg} />}
+                            {activeTab === 'patients' && <PatientsView patients={filteredData.patients} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'patient', mode:'add'})} onEdit={(d)=>setModal({type:'patient', mode:'edit', data:d})} showToast={setToastMsg} />}
+                            {activeTab === 'appointments' && <AppointmentsView apps={filteredData.appointments} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} setConfirm={setConfirmAction} onAdd={()=>setModal({type:'app', mode:'add'})} onEdit={(d)=>setModal({type:'app', mode:'edit', data:d})} onNav={navigateTo} showToast={setToastMsg} />}
+                            {activeTab === 'finance' && isSuperAdmin && <FinanceView payments={filteredData.payments} branches={data.branches} currentUser={currentUser} setConfirm={setConfirmAction} onAdd={()=>setModal({type:'payment', mode:'add'})} onEdit={(d)=>setModal({type:'payment', mode:'edit', data:d})} showToast={setToastMsg} />}
+                            {activeTab === 'staff' && isSuperAdmin && <StaffView staff={data.staff} branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'staff', mode:'add'})} onEdit={(d)=>setModal({type:'staff', mode:'edit', data:d})} showToast={setToastMsg} />}
+                            {activeTab === 'shortages' && <ShortagesView shortages={filteredData.shortages} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onEdit={(d)=>setModal({type:'shortage', mode:'edit', data:d})} showToast={setToastMsg} />}
                         </div>
                     </div>
                 </div>
             );
         }
 
-        // --- شاشة الدخول مع ميزة تذكرني ---
         function LoginView({ onLogin, staffData }) {
             const [code, setCode] = useState(['', '', '', '']);
             const [rememberMe, setRememberMe] = useState(true);
@@ -342,15 +363,12 @@
             );
         }
 
-        function ShortagesView({ shortages, branches, currentUser, selectedBranch, onConfirm, onEdit }) {
+        function ShortagesView({ shortages, branches, currentUser, selectedBranch, onConfirm, onEdit, showToast }) {
             const [itemName, setItemName] = useState('');
             const [quantity, setQuantity] = useState('');
-            
             const [branchId, setBranchId] = useState(currentUser.role === 'employee' ? currentUser.branchId : (selectedBranch === 'all' ? 'store' : selectedBranch));
 
-            const sortedShortages = useMemo(() => {
-                return [...shortages].sort((a,b) => new Date(b.timestamp) - new Date(a.timestamp));
-            }, [shortages]);
+            const sortedShortages = useMemo(() => [...shortages].sort((a,b) => new Date(b.timestamp) - new Date(a.timestamp)), [shortages]);
 
             const groupedShortages = useMemo(() => {
                 if (selectedBranch !== 'all') return { [selectedBranch]: sortedShortages };
@@ -366,8 +384,9 @@
             const handleAdd = (e) => {
                 e.preventDefault();
                 if (!itemName || !quantity) return;
-                db.collection('shortages').add({ itemName, quantity, branchId, requestedBy: currentUser.name, timestamp: new Date().toISOString() });
-                setItemName(''); setQuantity('');
+                db.collection('shortages').add({ itemName, quantity, branchId, requestedBy: currentUser.name, timestamp: new Date().toISOString() })
+                .then(() => { setItemName(''); setQuantity(''); showToast("تم إضافة الصنف للمخزن"); })
+                .catch(err => showToast("مشكلة في إضافة صنف: " + err.message));
             };
 
             return (
@@ -430,7 +449,11 @@
                                                             <button onClick={() => onEdit(item)} className="bg-white text-gold-500 hover:bg-gold-500 hover:text-white p-1.5 rounded-lg border border-gray-200 transition-colors">
                                                                 <IconEdit />
                                                             </button>
-                                                            <button onClick={() => onConfirm({ msg: 'هل تم توفير وشراء هذا الصنف؟', onConfirm: () => { db.collection('shortages').doc(item.id).delete(); onConfirm(null); }})} className="flex-1 sm:flex-none bg-emerald-50 text-emerald-600 hover:bg-emerald-500 hover:text-white px-3 py-1.5 rounded-lg font-bold text-[10px] border border-emerald-100 transition-colors text-center">
+                                                            <button onClick={() => onConfirm({ msg: 'هل تم توفير وشراء هذا الصنف؟', onConfirm: () => { 
+                                                                db.collection('shortages').doc(item.id).delete()
+                                                                .then(() => showToast("تم شراء الصنف وإزالته بنجاح"))
+                                                                .catch(err => showToast("مشكلة في الحذف: " + err.message)); 
+                                                            }})} className="flex-1 sm:flex-none bg-emerald-50 text-emerald-600 hover:bg-emerald-500 hover:text-white px-3 py-1.5 rounded-lg font-bold text-[10px] border border-emerald-100 transition-colors text-center">
                                                                 ✅ تم الشراء
                                                             </button>
                                                         </div>
@@ -448,7 +471,7 @@
         }
 
         // --- المواعيد ---
-        function AppointmentsView({ apps, branches, currentUser, selectedBranch, setConfirm, onAdd, onEdit, onNav }) {
+        function AppointmentsView({ apps, branches, currentUser, selectedBranch, setConfirm, onAdd, onEdit, onNav, showToast }) {
             const [viewMode, setViewMode] = useState('daily'); 
             const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
 
@@ -488,6 +511,25 @@
                 }
                 return days;
             }, [filteredApps, selectedDate]);
+
+            const handleManualCleanup = () => {
+                setConfirm({
+                    msg: 'هل أنت متأكد من مسح جميع المواعيد التي مر عليها أكثر من شهر؟ (إجراء آمن)',
+                    onConfirm: () => {
+                        const oneMonthAgo = new Date();
+                        oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
+                        const cutoffDate = oneMonthAgo.toISOString().split('T')[0];
+                        
+                        apps.forEach(app => {
+                            if (app.date && app.date < cutoffDate) {
+                                db.collection('appointments').doc(app.id).delete()
+                                .catch(err => showToast("خطأ في مسح موعد: " + err.message));
+                            }
+                        });
+                        showToast("تم تنظيف المواعيد القديمة بنجاح.");
+                    }
+                });
+            };
 
             const renderCalendar = () => {
                 const date = new Date(selectedDate);
@@ -536,7 +578,11 @@
                     </div>
                     <div className="flex gap-1 shrink-0 self-end sm:self-auto">
                         <button onClick={()=>onEdit(a)} className="p-1.5 bg-white border border-gray-200 text-gold-500 rounded-lg hover:bg-gold-500 hover:text-white transition-colors"><IconEdit/></button>
-                        <button onClick={()=>setConfirm({msg:'إلغاء الموعد نهائياً؟', onConfirm:()=>{db.collection('appointments').doc(a.id).delete(); setConfirm(null);}})} className="p-1.5 bg-white border border-gray-200 text-red-500 rounded-lg hover:bg-red-500 hover:text-white transition-colors"><IconTrash/></button>
+                        <button onClick={()=>setConfirm({msg:'إلغاء الموعد نهائياً؟', onConfirm:()=>{
+                            db.collection('appointments').doc(a.id).delete()
+                            .then(() => showToast("تم إلغاء الموعد"))
+                            .catch(err => showToast("مشكلة في حذف الموعد: " + err.message)); 
+                        }})} className="p-1.5 bg-white border border-gray-200 text-red-500 rounded-lg hover:bg-red-500 hover:text-white transition-colors"><IconTrash/></button>
                     </div>
                 </div>
             );
@@ -551,7 +597,13 @@
                             <button onClick={() => setViewMode('monthly')} className={`flex-1 px-4 py-1.5 text-xs font-bold rounded-lg transition-all ${viewMode==='monthly' ? 'bg-white shadow text-gold-600' : 'text-gray-500'}`}>شهري</button>
                         </div>
                         <input type="date" value={selectedDate} onChange={(e)=>setSelectedDate(e.target.value)} className="w-full lg:w-auto bg-white border border-gray-200 text-xs font-bold p-2 rounded-xl outline-none focus:border-gold-500"/>
-                        <button onClick={onAdd} className="w-full lg:w-auto bg-gold-500 text-white px-5 py-2 rounded-xl text-xs font-black shadow-md hover:bg-gold-600 transition-colors">+ حجز</button>
+                        
+                        <div className="flex gap-2 w-full lg:w-auto">
+                            {currentUser.role === 'superadmin' && (
+                                <button onClick={handleManualCleanup} className="w-full lg:w-auto bg-red-50 text-red-600 border border-red-200 px-3 py-2 rounded-xl text-[10px] font-black hover:bg-red-500 hover:text-white transition-colors">تنظيف المواعيد القديمة</button>
+                            )}
+                            <button onClick={onAdd} className="w-full lg:w-auto bg-gold-500 text-white px-5 py-2 rounded-xl text-xs font-black shadow-md hover:bg-gold-600 transition-colors">+ حجز</button>
+                        </div>
                     </div>
 
                     {viewMode === 'daily' && (
@@ -618,7 +670,7 @@
             );
         }
 
-        function BranchesView({ branches, onConfirm, onAdd, onEdit }) {
+        function BranchesView({ branches, onConfirm, onAdd, onEdit, showToast }) {
             return (
                 <div className="space-y-4 w-full animate-fade-in">
                     <div className="flex justify-between items-center"><h3 className="text-lg font-black text-gray-800">إدارة الفروع</h3><button onClick={onAdd} className="bg-gold-500 text-white px-4 py-1.5 rounded-xl text-xs font-bold shadow-md hover:bg-gold-600">+ فرع جديد</button></div>
@@ -627,7 +679,11 @@
                             <div key={b.id} className="bg-white p-4 rounded-[20px] border border-gray-100 shadow-sm relative group flex flex-col h-full">
                                 <div className="absolute top-2 left-2 flex gap-1">
                                     <button onClick={() => onEdit(b)} className="p-1.5 text-gold-500 bg-white border border-gray-200 rounded-lg hover:bg-gold-500 hover:text-white transition-colors"><IconEdit/></button>
-                                    <button onClick={() => onConfirm({msg:'حذف الفرع؟', onConfirm:()=>{db.collection('branches').doc(b.id).delete(); onConfirm(null);}})} className="p-1.5 text-red-500 bg-white border border-gray-200 rounded-lg hover:bg-red-500 hover:text-white transition-colors"><IconTrash/></button>
+                                    <button onClick={() => onConfirm({msg:'حذف الفرع؟', onConfirm:()=>{
+                                        db.collection('branches').doc(b.id).delete()
+                                        .then(() => showToast("تم حذف الفرع"))
+                                        .catch(err => showToast("مشكلة في الحذف: " + err.message)); 
+                                    }})} className="p-1.5 text-red-500 bg-white border border-gray-200 rounded-lg hover:bg-red-500 hover:text-white transition-colors"><IconTrash/></button>
                                 </div>
                                 <div className="text-gold-500 mb-2 bg-gray-50 w-10 h-10 rounded-xl flex items-center justify-center"><IconBuilding/></div>
                                 <h4 className="text-sm font-black text-gray-800 mb-0.5">{b.name}</h4>
@@ -646,31 +702,71 @@
             );
         }
 
-        function PatientsView({ patients, currentUser, onConfirm, onAdd, onEdit }) {
+        // --- سجل المرضى الجديد بتصميم الكروت الشيك للموبايل ---
+        function PatientsView({ patients, currentUser, onConfirm, onAdd, onEdit, showToast }) {
             return (
                 <div className="space-y-4 w-full animate-fade-in">
-                    <div className="flex justify-between items-center"><h3 className="text-lg font-black text-gray-800">سجل المرضى</h3><button onClick={onAdd} className="bg-gold-500 text-white px-4 py-1.5 rounded-xl text-xs font-bold shadow-md hover:bg-gold-600">+ مريض جديد</button></div>
-                    <div className="bg-white rounded-[20px] border border-gray-100 overflow-hidden shadow-sm w-full overflow-x-auto">
-                        <table className="w-full text-right text-xs min-w-[500px]">
-                            <thead className="bg-gray-50 text-gray-500 border-b"><tr><th className="p-4">ملف</th><th className="p-4">الاسم</th><th className="p-4">الهاتف</th><th className="p-4 text-center">أوامر</th></tr></thead>
-                            <tbody className="divide-y divide-gray-100">{patients.map(p => (
-                                <tr key={p.id} className="hover:bg-gray-50/50">
-                                    <td className="p-4 font-black text-gold-600">#{p.fileNo}</td>
-                                    <td className="p-4"><div className="font-bold text-gray-800 mb-0.5">{p.name}</div>{(currentUser.role === 'admin' || currentUser.role === 'superadmin') && p.recordedBy && <div className="text-[8px] text-gray-400">بواسطة: {p.recordedBy}</div>}</td>
-                                    <td className="p-4 text-gray-500 font-mono tracking-wider" dir="ltr">{p.phone}</td>
-                                    <td className="p-4 flex justify-center gap-1">
-                                        <button onClick={() => onEdit(p)} className="p-1.5 text-gold-500 bg-white border border-gray-200 rounded-lg hover:bg-gold-500 hover:text-white transition-colors"><IconEdit/></button>
-                                        <button onClick={() => onConfirm({msg:'حذف المريض نهائياً؟', onConfirm:()=>{db.collection('patients').doc(p.id).delete(); onConfirm(null);}})} className="p-1.5 text-red-500 bg-white border border-gray-200 rounded-lg hover:bg-red-500 hover:text-white transition-colors"><IconTrash/></button>
-                                    </td>
-                                </tr>
-                            ))}</tbody>
-                        </table>
+                    <div className="flex justify-between items-center">
+                        <h3 className="text-lg font-black text-gray-800">سجل المرضى</h3>
+                        <button onClick={onAdd} className="bg-gold-500 text-white px-4 py-1.5 rounded-xl text-xs font-bold shadow-md hover:bg-gold-600">+ مريض جديد</button>
                     </div>
+
+                    {patients.length === 0 ? (
+                        <div className="p-8 text-center text-gray-400 font-bold border border-dashed rounded-3xl bg-white text-sm">لا يوجد مرضى مسجلين حتى الآن.</div>
+                    ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                            {patients.map(p => (
+                                <div key={p.id} className="bg-white p-4 rounded-[20px] border border-gray-100 shadow-sm hover:shadow-md transition-shadow relative">
+                                    <div className="absolute top-4 left-4 flex gap-1.5">
+                                        <button onClick={() => onEdit(p)} className="p-1.5 text-gold-500 bg-gray-50 rounded-lg hover:bg-gold-500 hover:text-white transition-colors"><IconEdit/></button>
+                                        <button onClick={() => onConfirm({msg:'حذف المريض نهائياً؟', onConfirm:()=>{
+                                            db.collection('patients').doc(p.id).delete()
+                                            .then(() => showToast("تم حذف ملف المريض"))
+                                            .catch(err => showToast("مشكلة في الحذف: " + err.message)); 
+                                        }})} className="p-1.5 text-red-500 bg-red-50 rounded-lg hover:bg-red-500 hover:text-white transition-colors"><IconTrash/></button>
+                                    </div>
+                                    
+                                    <div className="flex items-start gap-3 mb-3">
+                                        <div className="w-12 h-12 rounded-xl bg-gold-50 text-gold-600 flex items-center justify-center font-black text-sm border border-gold-100 shrink-0">
+                                            #{p.fileNo || '-'}
+                                        </div>
+                                        <div className="pt-1">
+                                            <h4 className="font-black text-gray-800 text-sm mb-0.5">{p.name}</h4>
+                                            <p className="text-[10px] text-gray-500 font-mono tracking-wider" dir="ltr">{p.phone}</p>
+                                        </div>
+                                    </div>
+
+                                    <div className="space-y-2 bg-gray-50 p-3 rounded-xl border border-gray-100">
+                                        <div className="flex items-start gap-2">
+                                            <span className="text-gray-400 mt-0.5 shrink-0"><IconMapPin /></span>
+                                            <div>
+                                                <p className="text-[9px] font-bold text-gray-400 uppercase tracking-widest">العنوان</p>
+                                                <p className="text-xs font-bold text-gray-700">{p.address || 'غير مسجل'}</p>
+                                            </div>
+                                        </div>
+                                        <div className="flex items-start gap-2">
+                                            <span className="text-gray-400 mt-0.5 shrink-0"><IconClipboard /></span>
+                                            <div>
+                                                <p className="text-[9px] font-bold text-gray-400 uppercase tracking-widest">الخدمة</p>
+                                                <p className="text-xs font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded inline-block mt-0.5">{p.service || 'غير محدد'}</p>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {(currentUser.role === 'admin' || currentUser.role === 'superadmin') && p.recordedBy && (
+                                        <div className="mt-3 flex justify-end">
+                                            <p className="text-[8px] text-gray-400 bg-white px-2 py-1 border border-gray-100 rounded-full flex items-center gap-1"><IconUserCircle /> {p.recordedBy}</p>
+                                        </div>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    )}
                 </div>
             );
         }
 
-        function FinanceView({ payments, branches, currentUser, onConfirm, onAdd, onEdit }) {
+        function FinanceView({ payments, branches, currentUser, onConfirm, onAdd, onEdit, showToast }) {
             const total = payments.reduce((a,b)=>a+Number(b.amount||0),0);
             return (
                 <div className="space-y-4 w-full animate-fade-in">
@@ -684,11 +780,15 @@
                             <div key={p.id} className="flex justify-between items-center p-4 bg-gray-50 rounded-xl relative hover:bg-gray-100 transition-colors">
                                 <div className="absolute left-2 top-2 flex gap-1">
                                     <button onClick={() => onEdit(p)} className="p-1 text-gold-500 bg-white border border-gray-200 rounded-lg hover:bg-gold-500 hover:text-white transition-colors"><IconEdit/></button>
-                                    <button onClick={() => onConfirm({msg:'حذف التوريد؟', onConfirm:()=>{db.collection('payments').doc(p.id).delete(); onConfirm(null);}})} className="p-1 text-red-500 bg-white border border-gray-200 rounded-lg hover:bg-red-500 hover:text-white transition-colors"><IconTrash/></button>
+                                    <button onClick={() => onConfirm({msg:'هل تريد حذف هذا التوريد نهائياً؟', onConfirm:()=>{
+                                        db.collection('payments').doc(p.id).delete()
+                                        .then(() => showToast("تم حذف التوريد بنجاح!"))
+                                        .catch(err => showToast("مشكلة في الحذف: " + err.message)); 
+                                    }})} className="p-1 text-red-500 bg-white border border-gray-200 rounded-lg hover:bg-red-500 hover:text-white transition-colors"><IconTrash/></button>
                                 </div>
                                 <div className="mt-2">
                                     <div className="flex items-center gap-2 mb-1">
-                                        <p className="font-black text-xs text-gray-800">فرع {branches.find(b=>b.id===p.branchId)?.name}</p>
+                                        <p className="font-black text-xs text-gray-800">فرع {branches.find(b=>b.id===p.branchId)?.name || 'غير معروف'}</p>
                                         {p.paymentMethod && <span className="bg-emerald-100 text-emerald-700 text-[8px] px-1.5 py-0.5 rounded font-bold border border-emerald-200">{p.paymentMethod}</span>}
                                     </div>
                                     <p className="text-[9px] text-gray-500 font-bold">{p.date}</p>
@@ -701,7 +801,7 @@
             );
         }
 
-        function StaffView({ staff, branches, onConfirm, onAdd, onEdit }) {
+        function StaffView({ staff, branches, onConfirm, onAdd, onEdit, showToast }) {
             return (
                 <div className="space-y-4 w-full animate-fade-in">
                     <div className="flex justify-between items-center"><h3 className="text-lg font-black text-gray-800">الموظفين</h3><button onClick={onAdd} className="bg-gold-500 text-white px-4 py-1.5 rounded-xl text-xs font-bold shadow-md hover:bg-gold-600">+ موظف جديد</button></div>
@@ -715,7 +815,11 @@
                                     <td className="p-2 text-gray-500">{s.branchId === 'all' ? 'مدير عام' : branches.find(b=>b.id===s.branchId)?.name}</td>
                                     <td className="p-2 flex justify-center gap-1">
                                         <button onClick={() => onEdit(s)} className="p-1 text-gold-500 bg-white border border-gray-200 rounded hover:bg-gold-500 hover:text-white transition-colors"><IconEdit/></button>
-                                        <button onClick={() => onConfirm({msg:'حذف الموظف نهائياً؟', onConfirm:()=>{db.collection('staff_members').doc(s.id).delete(); onConfirm(null);}})} className="p-1 text-red-500 bg-white border border-gray-200 rounded hover:bg-red-500 hover:text-white transition-colors"><IconTrash/></button>
+                                        <button onClick={() => onConfirm({msg:'حذف الموظف نهائياً؟', onConfirm:()=>{
+                                            db.collection('staff_members').doc(s.id).delete()
+                                            .then(() => showToast("تم حذف الموظف"))
+                                            .catch(err => showToast("مشكلة في الحذف: " + err.message)); 
+                                        }})} className="p-1 text-red-500 bg-white border border-gray-200 rounded hover:bg-red-500 hover:text-white transition-colors"><IconTrash/></button>
                                     </td>
                                 </tr>
                             ))}</tbody>
@@ -725,23 +829,30 @@
             );
         }
 
-        // --- Modals ---
+        // --- إصلاح المودال (بيقفل لوحده متقلقش) ---
         function ConfirmModal({ action, onClose }) {
+            const handleConfirm = () => {
+                if(action.onConfirm) action.onConfirm();
+                onClose(); // هنا بيقفل النافذة فوراً
+            };
+
             return (
                 <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[99999] flex items-center justify-center p-6 text-center animate-fade-in">
-                    <div className="bg-white w-full max-w-sm rounded-[20px] p-6 animate-pop border border-gray-100">
+                    <div className="bg-white w-full max-w-sm rounded-[20px] p-6 animate-pop border border-gray-100 shadow-2xl">
+                        <div className="w-16 h-16 bg-red-50 text-red-500 rounded-full flex items-center justify-center mx-auto mb-4">
+                            <IconTrash />
+                        </div>
                         <h3 className="text-lg font-black text-gray-800 mb-6">{action.msg}</h3>
                         <div className="flex gap-3">
-                            <button onClick={action.onConfirm} className="flex-1 py-3 bg-red-500 text-white rounded-xl font-black text-xs">نعم</button>
-                            <button onClick={onClose} className="flex-1 py-3 bg-gray-100 text-gray-700 rounded-xl font-black text-xs">لا</button>
+                            <button onClick={handleConfirm} className="flex-1 py-3 bg-red-500 text-white rounded-xl font-black text-xs hover:bg-red-600 transition-colors shadow-md hover:shadow-lg hover:-translate-y-0.5 transform duration-200">نعم، متأكد</button>
+                            <button onClick={onClose} className="flex-1 py-3 bg-gray-100 text-gray-700 rounded-xl font-black text-xs hover:bg-gray-200 transition-colors">إلغاء</button>
                         </div>
                     </div>
                 </div>
             );
         }
 
-        // تم إضافة السكرول الخاص بالنافذة (حل مشكلة الكيبورد)
-        function DataModal({ modal, branches, user, selectedBranch, onClose }) {
+        function DataModal({ modal, branches, user, selectedBranch, onClose, showToast }) {
             const save = (e) => {
                 e.preventDefault();
                 const f = e.target;
@@ -752,7 +863,7 @@
                 } else if(modal.type==='staff') {
                     col='staff_members'; d={name:f.name.value, code:f.code.value, branchId:f.bId.value, role: f.bId.value==='all'?'admin':'employee'};
                 } else if(modal.type==='patient') {
-                    col='patients'; d={fileNo:f.fileNo.value, name:f.name.value, phone:f.phone.value, service:f.service.value, branchId:(user.role==='admin' || user.role==='superadmin')?f.bId.value:user.branchId, recordedBy:user.name};
+                    col='patients'; d={fileNo:f.fileNo.value, name:f.name.value, phone:f.phone.value, address:f.address.value, service:f.service.value, branchId:(user.role==='admin' || user.role==='superadmin')?f.bId.value:user.branchId, recordedBy:user.name};
                 } else if(modal.type==='payment') {
                     col='payments'; d={amount:f.amt.value, date:f.dt.value, branchId:f.bId.value, receivedBy:user.name, paymentMethod: f.payMethod.value};
                 } else if(modal.type==='branch') {
@@ -762,9 +873,15 @@
                     if(modal.mode !== 'edit') { d.requestedBy = user.name; d.timestamp = new Date().toISOString(); }
                 }
 
-                if(modal.mode==='edit') db.collection(col).doc(modal.data.id).update(d);
-                else db.collection(col).add(d);
-                onClose();
+                if(modal.mode==='edit') {
+                    db.collection(col).doc(modal.data.id).update(d)
+                      .then(() => { onClose(); showToast("تم التعديل بنجاح"); })
+                      .catch(err => showToast("مشكلة في التعديل! تفاصيل الخطأ: " + err.message));
+                } else {
+                    db.collection(col).add(d)
+                      .then(() => { onClose(); showToast("تمت الإضافة بنجاح"); })
+                      .catch(err => showToast("مشكلة في الإضافة! تفاصيل الخطأ: " + err.message));
+                }
             };
 
             return (
@@ -799,8 +916,11 @@
                                             <Input name="fileNo" label="رقم الملف" defaultValue={modal.data?.fileNo} required />
                                             <Input name="name" label="الاسم الكامل" defaultValue={modal.data?.name} required />
                                         </div>
-                                        <Input name="phone" label="رقم الهاتف" defaultValue={modal.data?.phone} type="tel" required />
-                                        <Input name="service" label="الخدمة" defaultValue={modal.data?.service} />
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <Input name="phone" label="رقم الهاتف" defaultValue={modal.data?.phone} type="tel" required />
+                                            <Input name="service" label="الخدمة" defaultValue={modal.data?.service} />
+                                        </div>
+                                        <Input name="address" label="العنوان" defaultValue={modal.data?.address} placeholder="مثال: المنيا، شارع طه حسين..." />
                                         {(user.role === 'admin' || user.role === 'superadmin') && (
                                             <div className="space-y-1">
                                                 <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الفرع</label>
@@ -876,6 +996,20 @@
                 <div className="space-y-1">
                     <label className="text-[9px] font-black text-gray-500 uppercase tracking-widest block">{label}</label>
                     <input {...props} className="w-full bg-gray-50 border border-gray-100 focus:border-gold-500 p-3 rounded-xl outline-none font-bold text-gray-800 text-xs shadow-inner transition-colors" />
+                </div>
+            );
+        }
+
+        function Toast({ msg, onClose }) {
+            useEffect(() => {
+                const timer = setTimeout(onClose, 3000);
+                return () => clearTimeout(timer);
+            }, [onClose]);
+            return (
+                <div className="fixed top-6 left-1/2 -translate-x-1/2 z-[999999] bg-gray-900 text-white px-5 py-3 rounded-2xl shadow-2xl animate-slide-up flex items-center gap-3 border border-gray-700">
+                    <IconCheck />
+                    <span className="font-bold text-xs">{msg}</span>
+                    <button onClick={onClose} className="text-gray-400 hover:text-white p-1"><IconX /></button>
                 </div>
             );
         }
