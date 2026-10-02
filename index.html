@@ -95,6 +95,8 @@
         const IconMapPin = () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>;
         const IconCheck = () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>;
 
+        const IconFlask = () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 3h6"></path><path d="M10 3v6L4 19a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2l-6-10V3"></path></svg>;
+
         function App() {
             const [isLoggedIn, setIsLoggedIn] = useState(false);
             const [currentUser, setCurrentUser] = useState(null);
@@ -106,7 +108,8 @@
             const [selectedBranch, setSelectedBranch] = useState('all');
             const [isSidebarOpen, setIsSidebarOpen] = useState(false);
             
-            const [data, setData] = useState({ branches: [], staff: [], patients: [], appointments: [], payments: [], shortages: [] });
+            const [data, setData] = useState({ branches: [], staff: [], patients: [], appointments: [], payments: [], shortages: [], labCases: [] });
+            const [costs, setCosts] = useState({});
             
             const [modal, setModal] = useState(null);
             const [confirmAction, setConfirmAction] = useState(null);
@@ -157,8 +160,20 @@
                     err => console.error(err)
                 );
                 
-                return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); unsub6(); };
+                const unsub7 = db.collection('lab_cases').onSnapshot(
+                    s => setData(d => ({...d, labCases: s.docs.map(x => ({id: x.id, ...x.data()}))})),
+                    err => console.error(err)
+                );
+                return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); unsub6(); unsub7(); };
             }, []);
+
+            // تكاليف المعامل: بتتحمل للسوبر أدمن فقط
+            useEffect(() => {
+                if (currentUser?.role !== 'superadmin') return;
+                return db.collection('lab_costs').onSnapshot(s => {
+                    const m = {}; s.docs.forEach(x => m[x.id] = Number(x.data().amount || 0)); setCosts(m);
+                }, err => console.error(err));
+            }, [currentUser]);
 
             // دالة تسجيل الدخول
             const doLogin = (code, staffData) => {
@@ -171,7 +186,7 @@
                     if (found) {
                         setCurrentUser(found);
                         setIsLoggedIn(true);
-                        if (found.role === 'employee') setSelectedBranch(found.branchId);
+                        if (found.role === 'employee' || (found.role === 'doctor' && found.branchId !== 'all')) setSelectedBranch(found.branchId);
                         return true;
                     }
                 }
@@ -179,13 +194,14 @@
             };
 
             const filteredData = useMemo(() => {
-                const branchId = currentUser?.role === 'employee' ? currentUser.branchId : selectedBranch;
+                const branchId = (currentUser?.role === 'employee' || (currentUser?.role === 'doctor' && currentUser.branchId !== 'all')) ? currentUser.branchId : selectedBranch;
                 const filter = (i) => branchId === 'all' || i.branchId === branchId;
                 return {
                     patients: data.patients.filter(filter),
-                    appointments: data.appointments.filter(filter),
+                    appointments: data.appointments.filter(filter).filter(a => currentUser?.role !== 'doctor' || !a.doctorId || a.doctorId === currentUser.id),
                     payments: data.payments.filter(filter),
                     shortages: data.shortages.filter(filter),
+                    labCases: data.labCases.filter(filter),
                     branches: data.branches
                 };
             }, [data, currentUser, selectedBranch]);
@@ -194,13 +210,14 @@
 
             const isSuperAdmin = currentUser.role === 'superadmin';
             const isAdminOrSuper = currentUser.role === 'admin' || currentUser.role === 'superadmin';
+            const isDoctor = currentUser.role === 'doctor';
 
             return (
                 <div className="flex h-screen overflow-hidden text-gray-800 bg-[#FDFCFB] relative">
                     {/* التوست ورسائل التأكيد */}
                     {toastMsg && <Toast msg={toastMsg} onClose={() => setToastMsg(null)} />}
                     {confirmAction && <ConfirmModal action={confirmAction} onClose={()=>setConfirmAction(null)} />}
-                    {modal && <DataModal modal={modal} branches={data.branches} user={currentUser} selectedBranch={selectedBranch} onClose={()=>setModal(null)} showToast={setToastMsg} />}
+                    {modal && <DataModal modal={modal} staff={data.staff} costs={costs} labNames={[...new Set(data.labCases.map(c => c.labName).filter(Boolean))]} branches={data.branches} user={currentUser} selectedBranch={selectedBranch} onClose={()=>setModal(null)} showToast={setToastMsg} />}
 
                     {/* Overlay للطبقة الشفافة عشان تقفل القايمة الجانبية لما تدوس بره */}
                     {isSidebarOpen && (
@@ -219,10 +236,11 @@
                         <nav className="flex-1 p-6 space-y-2 overflow-y-auto custom-scrollbar">
                             {isAdminOrSuper && <SidebarItem icon={<IconDashboard/>} label="لوحة التحكم" active={activeTab === 'dashboard'} onClick={() => navigateTo('dashboard')} />}
                             {isAdminOrSuper && <SidebarItem icon={<IconBuilding/>} label="إدارة الفروع" active={activeTab === 'branches'} onClick={() => navigateTo('branches')} />}
-                            <SidebarItem icon={<IconUsers/>} label="سجل المرضى" active={activeTab === 'patients'} onClick={() => navigateTo('patients')} />
+                            {!isDoctor && <SidebarItem icon={<IconUsers/>} label="سجل المرضى" active={activeTab === 'patients'} onClick={() => navigateTo('patients')} />}
                             <SidebarItem icon={<IconCalendar/>} label="المواعيد والتقويم" active={activeTab === 'appointments'} onClick={() => navigateTo('appointments')} />
-                            <SidebarItem icon={<IconClipboard/>} label="النواقص والمخزن" active={activeTab === 'shortages'} onClick={() => navigateTo('shortages')} />
-                            {isSuperAdmin && <SidebarItem icon={<IconWallet/>} label="توريدات الفروع" active={activeTab === 'finance'} onClick={() => navigateTo('finance')} />}
+                            {!isDoctor && <SidebarItem icon={<IconClipboard/>} label="النواقص والمخزن" active={activeTab === 'shortages'} onClick={() => navigateTo('shortages')} />}
+                            {!isDoctor && <SidebarItem icon={<IconFlask/>} label="المعامل" active={activeTab === 'labs'} onClick={() => navigateTo('labs')} />}
+                            {isSuperAdmin && <SidebarItem icon={<IconWallet/>} label="الماليات" active={activeTab === 'finance'} onClick={() => navigateTo('finance')} />}
                             {isSuperAdmin && <SidebarItem icon={<IconCog/>} label="الموظفين" active={activeTab === 'staff'} onClick={() => navigateTo('staff')} />}
                         </nav>
                     </div>
@@ -237,7 +255,7 @@
                                     <button type="button" onClick={goBack} disabled={currentIndex === 0} className={`p-1.5 sm:p-2 rounded-full transition-colors flex items-center justify-center ${currentIndex > 0 ? 'text-gray-600 hover:text-gold-600 hover:bg-white shadow-sm' : 'text-gray-300 cursor-not-allowed'}`} title="رجوع">
                                         <IconBack />
                                     </button>
-                                    <button type="button" onClick={() => navigateTo('dashboard')} className="p-1.5 sm:p-2 rounded-full transition-colors flex items-center justify-center text-gray-600 hover:text-gold-600 hover:bg-white shadow-sm mx-1" title="الرئيسية">
+                                    <button type="button" onClick={() => navigateTo(isDoctor ? 'appointments' : 'dashboard')} className="p-1.5 sm:p-2 rounded-full transition-colors flex items-center justify-center text-gray-600 hover:text-gold-600 hover:bg-white shadow-sm mx-1" title="الرئيسية">
                                         <IconHome />
                                     </button>
                                     <button type="button" onClick={goForward} disabled={currentIndex === history.length - 1} className={`p-1.5 sm:p-2 rounded-full transition-colors flex items-center justify-center ${currentIndex < history.length - 1 ? 'text-gray-600 hover:text-gold-600 hover:bg-white shadow-sm' : 'text-gray-300 cursor-not-allowed'}`} title="للأمام">
@@ -255,20 +273,21 @@
                                 )}
                                 <div className="text-left hidden sm:block pr-4 border-r border-gray-200">
                                     <p className="text-xs font-black text-gray-800">{currentUser.name}</p>
-                                    <p className="text-[10px] text-gold-500 font-bold uppercase">{isSuperAdmin ? 'Super Admin' : currentUser.role === 'admin' ? 'مدير عام' : 'موظف فرع'}</p>
+                                    <p className="text-[10px] text-gold-500 font-bold uppercase">{isSuperAdmin ? 'Super Admin' : currentUser.role === 'admin' ? 'مدير عام' : currentUser.role === 'doctor' ? 'طبيب' : 'موظف فرع'}</p>
                                 </div>
                                 <button type="button" onClick={() => {localStorage.removeItem('newEraSavedCode'); window.location.reload();}} className="text-red-500 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-xl font-bold text-xs transition-colors">خروج</button>
                             </div>
                         </header>
 
                         <div className="flex-1 p-3 md:p-8 overflow-y-auto w-full custom-scrollbar pb-20">
-                            {activeTab === 'dashboard' && <DashboardStats data={filteredData} userRole={currentUser.role} onNav={navigateTo} />}
+                            {activeTab === 'dashboard' && !isDoctor && <DashboardStats data={filteredData} userRole={currentUser.role} onNav={navigateTo} />}
                             {activeTab === 'branches' && <BranchesView branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'branch', mode:'add'})} onEdit={(d)=>setModal({type:'branch', mode:'edit', data:d})} showToast={setToastMsg} />}
-                            {activeTab === 'patients' && <PatientsView patients={filteredData.patients} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'patient', mode:'add'})} onEdit={(d)=>setModal({type:'patient', mode:'edit', data:d})} showToast={setToastMsg} />}
+                            {activeTab === 'patients' && !isDoctor && <PatientsView patients={filteredData.patients} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'patient', mode:'add'})} onEdit={(d)=>setModal({type:'patient', mode:'edit', data:d})} showToast={setToastMsg} />}
                             {activeTab === 'appointments' && <AppointmentsView apps={filteredData.appointments} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'app', mode:'add'})} onEdit={(d)=>setModal({type:'app', mode:'edit', data:d})} onNav={navigateTo} showToast={setToastMsg} />}
-                            {activeTab === 'finance' && isSuperAdmin && <FinanceView payments={filteredData.payments} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'payment', mode:'add'})} onEdit={(d)=>setModal({type:'payment', mode:'edit', data:d})} showToast={setToastMsg} />}
-                            {activeTab === 'staff' && isSuperAdmin && <StaffView staff={data.staff} branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'staff', mode:'add'})} onEdit={(d)=>setModal({type:'staff', mode:'edit', data:d})} showToast={setToastMsg} />}
-                            {activeTab === 'shortages' && <ShortagesView shortages={filteredData.shortages} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onEdit={(d)=>setModal({type:'shortage', mode:'edit', data:d})} showToast={setToastMsg} />}
+                            {activeTab === 'finance' && isSuperAdmin && <FinanceView payments={filteredData.payments} branches={data.branches} selectedBranch={selectedBranch} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={(bId)=>setModal({type:'payment', mode:'add', data:{branchId:bId}})} onEdit={(d)=>setModal({type:'payment', mode:'edit', data:d})} showToast={setToastMsg} />}
+                            {activeTab === 'staff' && isSuperAdmin && <StaffView staff={data.staff} branches={data.branches} onConfirm={setConfirmAction} onAdd={(k)=>setModal({type:'staff', mode:'add', data:{kind:k}})} onEdit={(d)=>setModal({type:'staff', mode:'edit', data:d})} showToast={setToastMsg} />}
+                            {activeTab === 'labs' && !isDoctor && <LabsView cases={filteredData.labCases} costs={costs} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'lab', mode:'add'})} onEdit={(d)=>setModal({type:'lab', mode:'edit', data:d})} showToast={setToastMsg} />}
+                            {activeTab === 'shortages' && !isDoctor && <ShortagesView shortages={filteredData.shortages} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onEdit={(d)=>setModal({type:'shortage', mode:'edit', data:d})} showToast={setToastMsg} />}
                         </div>
                     </div>
                 </div>
@@ -520,13 +539,13 @@
                         oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
                         const cutoffDate = oneMonthAgo.toISOString().split('T')[0];
                         
-                        apps.forEach(app => {
-                            if (app.date && app.date < cutoffDate) {
-                                db.collection('appointments').doc(app.id).delete()
-                                .catch(err => showToast("خطأ في مسح موعد: " + err.message));
-                            }
+                        const old = apps.filter(app => app.date && app.date < cutoffDate);
+                        if (old.length === 0) { showToast("مفيش مواعيد أقدم من شهر."); return; }
+                        old.forEach(app => {
+                            db.collection('appointments').doc(app.id).delete()
+                            .catch(err => showToast("خطأ في مسح موعد: " + err.message));
                         });
-                        showToast("تم تنظيف المواعيد القديمة بنجاح.");
+                        showToast("تم مسح " + old.length + " موعد قديم.");
                     }
                 });
             };
@@ -579,7 +598,7 @@
                             {currentUser.role === 'superadmin' && (
                                 <button type="button" onClick={handleManualCleanup} className="w-full lg:w-auto bg-red-50 text-red-600 border border-red-200 px-3 py-2 rounded-xl text-[10px] font-black hover:bg-red-500 hover:text-white transition-colors">تنظيف المواعيد القديمة</button>
                             )}
-                            <button type="button" onClick={onAdd} className="w-full lg:w-auto bg-gold-500 text-white px-5 py-2 rounded-xl text-xs font-black shadow-md hover:bg-gold-600 transition-colors">+ حجز</button>
+                            {currentUser.role !== 'doctor' && <button type="button" onClick={onAdd} className="w-full lg:w-auto bg-gold-500 text-white px-5 py-2 rounded-xl text-xs font-black shadow-md hover:bg-gold-600 transition-colors">+ حجز</button>}
                         </div>
                     </div>
 
@@ -609,17 +628,18 @@
                                                                 <div className="flex flex-wrap items-center gap-1.5">
                                                                     <span className="text-[9px] font-mono font-bold text-gray-500 tracking-wider" dir="ltr">{a.phone || 'بدون رقم'}</span>
                                                                     {a.service && <span className="text-[8px] bg-blue-50 text-blue-600 px-1.5 rounded font-bold">{a.service}</span>}
+                                                                    {a.doctorName && <span className="text-[8px] bg-purple-50 text-purple-600 px-1.5 rounded font-bold">د. {a.doctorName}</span>}
                                                                 </div>
                                                             </div>
                                                         </div>
-                                                        <div className="flex gap-1 shrink-0 self-end sm:self-auto">
+                                                        <div className="flex gap-1 shrink-0 self-end sm:self-auto items-center"><StatusSelect a={a} showToast={showToast} />{currentUser.role !== 'doctor' && (<>
                                                             <button type="button" onClick={()=>onEdit(a)} className="p-1.5 bg-white border border-gray-200 text-gold-500 rounded-lg hover:bg-gold-500 hover:text-white transition-colors"><IconEdit/></button>
                                                             <button type="button" onClick={()=>onConfirm({msg:'إلغاء الموعد نهائياً؟', onConfirm:()=>{
                                                                 db.collection('appointments').doc(a.id).delete()
                                                                 .then(() => showToast("تم إلغاء الموعد"))
                                                                 .catch(err => showToast("مشكلة في حذف الموعد: " + err.message)); 
                                                             }})} className="p-1.5 bg-white border border-gray-200 text-red-500 rounded-lg hover:bg-red-500 hover:text-white transition-colors"><IconTrash/></button>
-                                                        </div>
+                                                        </>)}</div>
                                                     </div>
                                                 ))}
                                             </div>
@@ -764,30 +784,83 @@
             );
         }
 
-        function FinanceView({ payments, branches, currentUser, onConfirm, onAdd, onEdit, showToast }) {
-            const total = payments.reduce((a,b)=>a+Number(b.amount||0),0);
+        const APP_STATUS = {
+            booked: { l: 'محجوز', c: 'bg-gray-100 text-gray-600' },
+            on_way: { l: 'في الطريق', c: 'bg-blue-100 text-blue-700' },
+            arrived: { l: 'حضر (الريسبشن)', c: 'bg-emerald-100 text-emerald-700' },
+            done: { l: 'أنهى الجلسة', c: 'bg-teal-100 text-teal-700' },
+            postponed: { l: 'مؤجل', c: 'bg-amber-100 text-amber-700' },
+            canceled: { l: 'كنسل', c: 'bg-red-100 text-red-600' }
+        };
+        function StatusSelect({ a, showToast }) {
+            const cur = a.status || 'booked';
+            return (
+                <select value={cur} onChange={e => db.collection('appointments').doc(a.id).update({ status: e.target.value }).catch(err => showToast("مشكلة في تغيير الحالة: " + err.message))}
+                    className={`text-[9px] font-black rounded-lg px-1.5 py-1.5 outline-none cursor-pointer ${APP_STATUS[cur].c}`}>
+                    {Object.entries(APP_STATUS).map(([k, v]) => <option key={k} value={k}>{v.l}</option>)}
+                </select>
+            );
+        }
+
+        // --- الماليات: خزنة كل فرع ---
+        function FinanceView({ payments, branches, selectedBranch, currentUser, onConfirm, onAdd, onEdit, showToast }) {
+            const num = v => Number(v || 0);
+            const shown = branches.filter(b => selectedBranch === 'all' || b.id === selectedBranch);
+            const pending = payments.filter(p => !p.delivered);
+            const totalPending = pending.reduce((s, p) => s + num(p.amount), 0);
+            const sorted = [...payments].sort((x, y) => (y.date || '').localeCompare(x.date || ''));
+            const settle = (b, reset) => onConfirm({
+                msg: (reset ? 'تصفير خزنة فرع ' : 'تأكيد توريد خزنة فرع ') + b.name + '؟',
+                onConfirm: () => {
+                    const batch = db.batch();
+                    pending.filter(p => p.branchId === b.id).forEach(p => batch.update(db.collection('payments').doc(p.id), { delivered: true, zeroed: reset, deliveredAt: new Date().toISOString() }));
+                    batch.commit().then(() => showToast(reset ? 'تم تصفير الخزنة' : 'تم تسجيل التوريد')).catch(err => showToast("مشكلة: " + err.message));
+                }
+            });
             return (
                 <div className="space-y-4 w-full animate-fade-in">
-                    <div className="bg-gradient-to-r from-gold-600 to-gold-400 p-6 rounded-[20px] text-white shadow-xl flex flex-wrap justify-between items-center gap-4 relative overflow-hidden">
-                        <div className="absolute top-0 right-0 w-40 h-40 bg-white/10 rounded-full blur-2xl -translate-y-1/2 translate-x-1/2"></div>
-                        <div className="relative z-10"><p className="text-gold-100 text-[10px] font-bold mb-1 uppercase tracking-widest">الإيرادات</p><h2 className="text-3xl font-black">{total} EGP</h2></div>
-                        <button type="button" onClick={onAdd} className="relative z-10 bg-white text-gold-600 px-5 py-2.5 rounded-xl text-xs font-black shadow-lg hover:scale-105 transition-transform">+ توريد يومي</button>
+                    <div className="bg-gradient-to-r from-gold-600 to-gold-400 p-6 rounded-[20px] text-white shadow-xl flex flex-wrap justify-between items-center gap-4">
+                        <div><p className="text-gold-100 text-[10px] font-bold mb-1">إجمالي الخزائن (لم يتم توريده)</p><h2 className="text-3xl font-black">{totalPending} EGP</h2></div>
+                        <button type="button" onClick={() => onAdd(selectedBranch === 'all' ? '' : selectedBranch)} className="bg-white text-gold-600 px-5 py-2.5 rounded-xl text-xs font-black shadow-lg">+ حساب اليوم</button>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                        {shown.map(b => {
+                            const mine = pending.filter(p => p.branchId === b.id);
+                            const bal = mine.reduce((s, p) => s + num(p.amount), 0);
+                            const delivered = payments.filter(p => p.branchId === b.id && p.delivered && !p.zeroed).reduce((s, p) => s + num(p.amount), 0);
+                            return (
+                                <div key={b.id} className="bg-white p-4 rounded-[20px] border border-gray-100 shadow-sm">
+                                    <div className="flex justify-between items-start mb-2">
+                                        <h4 className="font-black text-sm text-gray-800">{b.name}</h4>
+                                        <button type="button" onClick={() => onAdd(b.id)} className="text-[10px] font-black bg-gold-50 text-gold-600 border border-gold-200 px-2 py-1 rounded-lg">+ حساب اليوم</button>
+                                    </div>
+                                    <p className="text-[9px] text-gray-400 font-bold">في الخزنة ({mine.length} تسجيل)</p>
+                                    <p className="text-2xl font-black text-gray-800 mb-1">{bal} ج</p>
+                                    <p className="text-[9px] text-gray-400 font-bold mb-3">تم توريده سابقاً: {delivered} ج</p>
+                                    <div className="flex gap-2">
+                                        <button type="button" disabled={mine.length === 0} onClick={() => settle(b, false)} className="flex-1 py-2 rounded-lg text-[10px] font-black bg-emerald-500 text-white disabled:opacity-30">✅ تم التوريد</button>
+                                        <button type="button" disabled={mine.length === 0} onClick={() => settle(b, true)} className="py-2 px-3 rounded-lg text-[10px] font-black bg-gray-100 text-gray-600 disabled:opacity-30">تصفير</button>
+                                    </div>
+                                </div>
+                            );
+                        })}
                     </div>
                     <div className="bg-white p-3 rounded-[20px] border border-gray-100 shadow-sm space-y-2">
-                        {payments.sort((a,b)=>(b.date||'').localeCompare(a.date||'')).map(p=>(
-                            <div key={p.id} className="flex justify-between items-center p-4 bg-gray-50 rounded-xl relative hover:bg-gray-100 transition-colors">
+                        <h4 className="text-xs font-black text-gray-800 px-1">سجل الحسابات اليومية</h4>
+                        {sorted.length === 0 && <p className="text-gray-400 text-xs font-bold text-center p-4">لا توجد حسابات مسجلة.</p>}
+                        {sorted.map(p => (
+                            <div key={p.id} className="flex justify-between items-center p-4 bg-gray-50 rounded-xl relative">
                                 <div className="absolute left-2 top-2 flex gap-1">
-                                    <button type="button" onClick={() => onEdit(p)} className="p-1 text-gold-500 bg-white border border-gray-200 rounded-lg hover:bg-gold-500 hover:text-white transition-colors"><IconEdit/></button>
-                                    <button type="button" onClick={() => onConfirm({msg:'هل تريد حذف هذا التوريد نهائياً؟', onConfirm:()=>{
-                                        db.collection('payments').doc(p.id).delete()
-                                        .then(() => showToast("تم حذف التوريد بنجاح!"))
-                                        .catch(err => showToast("مشكلة في الحذف: " + err.message)); 
-                                    }})} className="p-1 text-red-500 bg-white border border-gray-200 rounded-lg hover:bg-red-500 hover:text-white transition-colors"><IconTrash/></button>
+                                    <button type="button" onClick={() => onEdit(p)} className="p-1 text-gold-500 bg-white border border-gray-200 rounded-lg"><IconEdit/></button>
+                                    <button type="button" onClick={() => onConfirm({msg:'هل تريد حذف هذا الحساب نهائياً؟', onConfirm:()=>{
+                                        db.collection('payments').doc(p.id).delete().then(() => showToast("تم الحذف")).catch(err => showToast("مشكلة في الحذف: " + err.message));
+                                    }})} className="p-1 text-red-500 bg-white border border-gray-200 rounded-lg"><IconTrash/></button>
                                 </div>
                                 <div className="mt-2">
-                                    <div className="flex items-center gap-2 mb-1">
-                                        <p className="font-black text-xs text-gray-800">فرع {branches.find(b=>b.id===p.branchId)?.name || 'غير معروف'}</p>
-                                        {p.paymentMethod && <span className="bg-emerald-100 text-emerald-700 text-[8px] px-1.5 py-0.5 rounded font-bold border border-emerald-200">{p.paymentMethod}</span>}
+                                    <div className="flex items-center gap-2 mb-1 flex-wrap">
+                                        <p className="font-black text-xs text-gray-800">فرع {branches.find(b => b.id === p.branchId)?.name || 'غير معروف'}</p>
+                                        {p.paymentMethod && <span className="bg-gray-200 text-gray-600 text-[8px] px-1.5 py-0.5 rounded font-bold">{p.paymentMethod}</span>}
+                                        <span className={`text-[8px] px-1.5 py-0.5 rounded font-bold ${!p.delivered ? 'bg-amber-100 text-amber-700' : p.zeroed ? 'bg-gray-200 text-gray-500' : 'bg-emerald-100 text-emerald-700'}`}>{!p.delivered ? 'في الخزنة' : p.zeroed ? 'تم التصفير' : 'تم التوريد'}</span>
                                     </div>
                                     <p className="text-[9px] text-gray-500 font-bold">{p.date}</p>
                                 </div>
@@ -799,30 +872,140 @@
             );
         }
 
+        // --- الموظفين + الأطباء ---
         function StaffView({ staff, branches, onConfirm, onAdd, onEdit, showToast }) {
+            const [tab, setTab] = useState('staff');
+            const list = staff.filter(s => tab === 'doctors' ? s.role === 'doctor' : s.role !== 'doctor');
             return (
                 <div className="space-y-4 w-full animate-fade-in">
-                    <div className="flex justify-between items-center"><h3 className="text-lg font-black text-gray-800">الموظفين</h3><button type="button" onClick={onAdd} className="bg-gold-500 text-white px-4 py-1.5 rounded-xl text-xs font-bold shadow-md hover:bg-gold-600">+ موظف جديد</button></div>
+                    <div className="flex justify-between items-center">
+                        <h3 className="text-lg font-black text-gray-800">إدارة الموظفين</h3>
+                        <button type="button" onClick={() => onAdd(tab === 'doctors' ? 'طبيب' : 'سكرتارية')} className="bg-gold-500 text-white px-4 py-1.5 rounded-xl text-xs font-bold shadow-md hover:bg-gold-600">{tab === 'doctors' ? '+ طبيب جديد' : '+ موظف جديد'}</button>
+                    </div>
+                    <div className="flex bg-gray-100 p-1 rounded-xl w-full sm:w-72">
+                        <button type="button" onClick={() => setTab('staff')} className={`flex-1 px-4 py-1.5 text-xs font-bold rounded-lg ${tab === 'staff' ? 'bg-white shadow text-gold-600' : 'text-gray-500'}`}>سكرتارية / تمريض</button>
+                        <button type="button" onClick={() => setTab('doctors')} className={`flex-1 px-4 py-1.5 text-xs font-bold rounded-lg ${tab === 'doctors' ? 'bg-white shadow text-gold-600' : 'text-gray-500'}`}>الأطباء</button>
+                    </div>
+                    {tab === 'doctors' && <p className="text-[10px] text-gray-400 font-bold">الطبيب يدخل بكوده ويشوف الحجوزات فقط، ويقدر يغيّر حالة الحجز.</p>}
                     <div className="bg-white rounded-[20px] border border-gray-100 overflow-hidden shadow-sm w-full overflow-x-auto">
-                        <table className="w-full text-right text-[10px] min-w-[350px]">
-                            <thead className="bg-gray-50 text-gray-500 border-b"><tr><th className="p-2">الاسم</th><th className="p-2 text-center">الكود</th><th className="p-2">الفرع</th><th className="p-2 text-center">أوامر</th></tr></thead>
-                            <tbody className="divide-y divide-gray-100">{staff.map(s => (
+                        <table className="w-full text-right text-[10px] min-w-[380px]">
+                            <thead className="bg-gray-50 text-gray-500 border-b"><tr><th className="p-2">الاسم</th><th className="p-2">الوظيفة</th><th className="p-2 text-center">الكود</th><th className="p-2">الفرع</th><th className="p-2 text-center">أوامر</th></tr></thead>
+                            <tbody className="divide-y divide-gray-100">{list.map(s => (
                                 <tr key={s.id} className="hover:bg-gray-50/50">
                                     <td className="p-2 font-bold text-gray-800">{s.name}</td>
+                                    <td className="p-2 text-gray-500">{s.jobTitle || (s.role === 'admin' ? 'مدير' : 'سكرتارية')}</td>
                                     <td className="p-2 text-center font-mono font-black text-gold-600 text-xs tracking-widest">{s.code}</td>
-                                    <td className="p-2 text-gray-500">{s.branchId === 'all' ? 'مدير عام' : branches.find(b=>b.id===s.branchId)?.name}</td>
+                                    <td className="p-2 text-gray-500">{s.branchId === 'all' ? 'كل الفروع' : branches.find(b => b.id === s.branchId)?.name}</td>
                                     <td className="p-2 flex justify-center gap-1">
                                         <button type="button" onClick={() => onEdit(s)} className="p-1 text-gold-500 bg-white border border-gray-200 rounded hover:bg-gold-500 hover:text-white transition-colors"><IconEdit/></button>
                                         <button type="button" onClick={() => onConfirm({msg:'حذف الموظف نهائياً؟', onConfirm:()=>{
-                                            db.collection('staff_members').doc(s.id).delete()
-                                            .then(() => showToast("تم حذف الموظف"))
-                                            .catch(err => showToast("مشكلة في الحذف: " + err.message)); 
+                                            db.collection('staff_members').doc(s.id).delete().then(() => showToast("تم الحذف")).catch(err => showToast("مشكلة في الحذف: " + err.message));
                                         }})} className="p-1 text-red-500 bg-white border border-gray-200 rounded hover:bg-red-500 hover:text-white transition-colors"><IconTrash/></button>
                                     </td>
                                 </tr>
                             ))}</tbody>
                         </table>
                     </div>
+                </div>
+            );
+        }
+
+        // --- المعامل ---
+        function LabsView({ cases, costs, branches, currentUser, selectedBranch, onConfirm, onAdd, onEdit, showToast }) {
+            const isSuper = currentUser.role === 'superadmin';
+            const [tab, setTab] = useState('cases');
+            const [labF, setLabF] = useState('all');
+            const [stF, setStF] = useState('all');
+            const today = () => new Date().toISOString().split('T')[0];
+            const labs = [...new Set(cases.map(c => c.labName).filter(Boolean))];
+            const atLab = c => c.status !== 'returned';
+            const list = cases.filter(c => (labF === 'all' || c.labName === labF) && (stF === 'all' || (stF === 'unpaid' ? !c.paid : stF === 'at_lab' ? atLab(c) : !atLab(c))))
+                .sort((x, y) => (y.sentDate || '').localeCompare(x.sentDate || ''));
+            const upd = (c, d, msg) => db.collection('lab_cases').doc(c.id).update(d).then(() => showToast(msg)).catch(err => showToast("مشكلة: " + err.message));
+            const accounts = labs.map(n => {
+                const cs = cases.filter(c => c.labName === n);
+                const tot = cs.reduce((s, c) => s + (costs[c.id] || 0), 0);
+                const paid = cs.filter(c => c.paid).reduce((s, c) => s + (costs[c.id] || 0), 0);
+                return { n, count: cs.length, atLab: cs.filter(atLab).length, tot, paid, rest: tot - paid };
+            });
+            const Chip = ({ t, v, c }) => <div className={`flex-1 min-w-[90px] p-3 rounded-xl ${c}`}><p className="text-[9px] font-bold">{t}</p><p className="text-xl font-black">{v}</p></div>;
+            return (
+                <div className="space-y-4 w-full animate-fade-in">
+                    <div className="flex justify-between items-center">
+                        <h3 className="text-lg font-black text-gray-800">المعامل</h3>
+                        <button type="button" onClick={onAdd} className="bg-gold-500 text-white px-4 py-1.5 rounded-xl text-xs font-bold shadow-md hover:bg-gold-600">+ حالة جديدة</button>
+                    </div>
+                    <div className="flex gap-2 flex-wrap">
+                        <Chip t="لنا عند المعمل" v={cases.filter(atLab).length} c="bg-amber-50 text-amber-700" />
+                        <Chip t="تم استلامها" v={cases.filter(c => !atLab(c)).length} c="bg-emerald-50 text-emerald-700" />
+                        <Chip t="لم يُدفع حسابها" v={cases.filter(c => !c.paid).length} c="bg-red-50 text-red-600" />
+                    </div>
+                    {isSuper && (
+                        <div className="flex bg-gray-100 p-1 rounded-xl w-full sm:w-72">
+                            <button type="button" onClick={() => setTab('cases')} className={`flex-1 px-4 py-1.5 text-xs font-bold rounded-lg ${tab === 'cases' ? 'bg-white shadow text-gold-600' : 'text-gray-500'}`}>الحالات</button>
+                            <button type="button" onClick={() => setTab('accounts')} className={`flex-1 px-4 py-1.5 text-xs font-bold rounded-lg ${tab === 'accounts' ? 'bg-white shadow text-gold-600' : 'text-gray-500'}`}>حسابات المعامل</button>
+                        </div>
+                    )}
+
+                    {tab === 'cases' && (<>
+                        <div className="flex gap-2 flex-wrap">
+                            <select value={labF} onChange={e => setLabF(e.target.value)} className="bg-white border border-gray-200 text-xs font-bold p-2 rounded-xl outline-none">
+                                <option value="all">كل المعامل</option>
+                                {labs.map(n => <option key={n} value={n}>{n} (عنده {cases.filter(c => c.labName === n && atLab(c)).length})</option>)}
+                            </select>
+                            <select value={stF} onChange={e => setStF(e.target.value)} className="bg-white border border-gray-200 text-xs font-bold p-2 rounded-xl outline-none">
+                                <option value="all">كل الحالات</option>
+                                <option value="at_lab">لنا عند المعمل</option>
+                                <option value="returned">تم الاستلام</option>
+                                <option value="unpaid">غير مدفوعة</option>
+                            </select>
+                        </div>
+                        {list.length === 0 ? <div className="p-8 text-center text-gray-400 font-bold border border-dashed rounded-3xl bg-white text-sm">لا توجد حالات.</div> : (
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                                {list.map(c => (
+                                    <div key={c.id} className="bg-white p-4 rounded-[20px] border border-gray-100 shadow-sm relative">
+                                        <div className="absolute top-3 left-3 flex gap-1">
+                                            <button type="button" onClick={() => onEdit(c)} className="p-1.5 text-gold-500 bg-gray-50 rounded-lg"><IconEdit/></button>
+                                            <button type="button" onClick={() => onConfirm({msg:'حذف الحالة نهائياً؟', onConfirm:()=>{
+                                                db.collection('lab_cases').doc(c.id).delete().then(() => { db.collection('lab_costs').doc(c.id).delete().catch(()=>{}); showToast("تم حذف الحالة"); }).catch(err => showToast("مشكلة في الحذف: " + err.message));
+                                            }})} className="p-1.5 text-red-500 bg-red-50 rounded-lg"><IconTrash/></button>
+                                        </div>
+                                        <span className="text-[10px] font-black bg-gold-50 text-gold-700 border border-gold-100 px-2 py-0.5 rounded-lg">{c.labName}</span>
+                                        <h4 className="font-black text-gray-800 text-sm mt-2">{c.patientName}</h4>
+                                        <p className="text-[11px] text-gray-500 font-bold mb-2">{c.caseType}</p>
+                                        <div className="flex flex-wrap gap-1.5 mb-2">
+                                            <span className={`text-[9px] font-black px-2 py-1 rounded-lg ${atLab(c) ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>{atLab(c) ? 'عند المعمل' : 'تم الاستلام'}</span>
+                                            <span className={`text-[9px] font-black px-2 py-1 rounded-lg ${c.paid ? 'bg-emerald-100 text-emerald-700' : 'bg-red-50 text-red-600'}`}>{c.paid ? 'الحساب مدفوع' : 'الحساب غير مدفوع'}</span>
+                                            {isSuper && costs[c.id] != null && <span className="text-[9px] font-black px-2 py-1 rounded-lg bg-gray-100 text-gray-700">{costs[c.id]} ج</span>}
+                                        </div>
+                                        <p className="text-[9px] text-gray-400 font-bold mb-1">سُلمت للمعمل: {c.sentDate || '-'}{c.dueDate ? ' • متوقع: ' + c.dueDate : ''}{c.returnDate && !atLab(c) ? ' • استُلمت: ' + c.returnDate : ''}</p>
+                                        {c.notes && <p className="text-[10px] text-gray-500 mb-1">{c.notes}</p>}
+                                        {selectedBranch === 'all' && <p className="text-[9px] text-gray-400 font-bold">{branches.find(b => b.id === c.branchId)?.name}</p>}
+                                        <div className="flex gap-2 mt-3">
+                                            <button type="button" onClick={() => upd(c, atLab(c) ? { status: 'returned', returnDate: today() } : { status: 'at_lab', returnDate: '' }, atLab(c) ? 'تم تسجيل الاستلام من المعمل' : 'رجعت الحالة للمعمل')} className="flex-1 py-2 rounded-lg text-[10px] font-black bg-blue-50 text-blue-600 border border-blue-100">{atLab(c) ? '📥 تم الاستلام من المعمل' : '↩ رجّعها للمعمل'}</button>
+                                            {c.paid
+                                                ? <button type="button" onClick={() => onConfirm({msg:'إلغاء تسجيل الدفع لهذه الحالة؟', onConfirm:()=>upd(c, { paid: false, paidAt: '', paidBy: '' }, 'تم إلغاء تسجيل الدفع')})} className="py-2 px-3 rounded-lg text-[10px] font-black bg-emerald-500 text-white">✅ مدفوع</button>
+                                                : <button type="button" onClick={() => upd(c, { paid: true, paidAt: today(), paidBy: currentUser.name }, 'تم تسجيل دفع الحساب')} className="py-2 px-3 rounded-lg text-[10px] font-black bg-emerald-50 text-emerald-600 border border-emerald-100">💰 تم الدفع</button>}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </>)}
+
+                    {tab === 'accounts' && isSuper && (
+                        <div className="bg-white rounded-[20px] border border-gray-100 shadow-sm overflow-x-auto">
+                            <table className="w-full text-right text-[10px] min-w-[420px]">
+                                <thead className="bg-gray-50 text-gray-500 border-b"><tr><th className="p-2">المعمل</th><th className="p-2 text-center">حالات</th><th className="p-2 text-center">عنده</th><th className="p-2 text-center">الإجمالي</th><th className="p-2 text-center">المدفوع</th><th className="p-2 text-center">المتبقي</th></tr></thead>
+                                <tbody className="divide-y divide-gray-100">
+                                    {accounts.map(r => (
+                                        <tr key={r.n}><td className="p-2 font-black text-gray-800">{r.n}</td><td className="p-2 text-center">{r.count}</td><td className="p-2 text-center">{r.atLab}</td><td className="p-2 text-center font-bold">{r.tot}</td><td className="p-2 text-center text-emerald-600 font-bold">{r.paid}</td><td className="p-2 text-center text-red-500 font-black">{r.rest}</td></tr>
+                                    ))}
+                                    {accounts.length === 0 && <tr><td colSpan="6" className="p-6 text-center text-gray-400 font-bold">لا توجد بيانات.</td></tr>}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
                 </div>
             );
         }
@@ -849,22 +1032,26 @@
             );
         }
 
-        function DataModal({ modal, branches, user, selectedBranch, onClose, showToast }) {
+        function DataModal({ modal, branches, user, selectedBranch, onClose, showToast, staff = [], costs = {}, labNames = [] }) {
             const save = (e) => {
                 e.preventDefault();
                 const f = e.target;
-                let col = ''; let d = {};
+                let col = ''; let d = {}; const costVal = f.cost ? f.cost.value : null;
+                const saveCost = (id) => { if (modal.type === 'lab' && costVal !== null && costVal !== '') db.collection('lab_costs').doc(id).set({ amount: Number(costVal) }).catch(err => showToast("مشكلة في حفظ التكلفة: " + err.message)); };
                 
                 if(modal.type==='app') {
-                    col='appointments'; d={patientName:f.pName.value, phone:f.phone.value, date:f.dt.value, time:f.tm.value, service:f.service.value, branchId:f.bId.value, recordedBy:user.name};
+                    col='appointments'; const doc = staff.find(s => s.id === f.docId.value); d={patientName:f.pName.value, phone:f.phone.value, date:f.dt.value, time:f.tm.value, service:f.service.value, branchId:f.bId.value, recordedBy:user.name, doctorId: doc ? doc.id : '', doctorName: doc ? doc.name : ''}; if(modal.mode!=='edit') d.status='booked';
                 } else if(modal.type==='staff') {
-                    col='staff_members'; d={name:f.name.value, code:f.code.value, branchId:f.bId.value, role: f.bId.value==='all'?'admin':'employee'};
+                    col='staff_members'; d={name:f.name.value, code:f.code.value, branchId:f.bId.value, jobTitle:f.jobTitle.value, role: f.jobTitle.value==='طبيب' ? 'doctor' : (f.bId.value==='all'?'admin':'employee')};
                 } else if(modal.type==='patient') {
                     col='patients'; d={fileNo:f.fileNo.value, name:f.name.value, phone:f.phone.value, address:f.address.value, service:f.service.value, branchId:(user.role==='admin' || user.role==='superadmin')?f.bId.value:user.branchId, recordedBy:user.name};
                 } else if(modal.type==='payment') {
-                    col='payments'; d={amount:f.amt.value, date:f.dt.value, branchId:f.bId.value, receivedBy:user.name, paymentMethod: f.payMethod.value};
+                    col='payments'; d={amount:f.amt.value, date:f.dt.value, branchId:f.bId.value, receivedBy:user.name, paymentMethod: f.payMethod.value}; if(modal.mode!=='edit') d.delivered=false;
                 } else if(modal.type==='branch') {
                     col='branches'; d={name:f.name.value, phone:f.phone.value, address: f.address.value, mapsLink: f.mapsLink.value};
+                } else if(modal.type==='lab') {
+                    col='lab_cases'; d={labName:f.labName.value.trim(), patientName:f.patientName.value, caseType:f.caseType.value, sentDate:f.sentDate.value, dueDate:f.dueDate.value, notes:f.notes.value, branchId:(user.role==='admin' || user.role==='superadmin')?f.bId.value:user.branchId};
+                    if(modal.mode!=='edit') { d.status='at_lab'; d.paid=false; d.recordedBy=user.name; }
                 } else if(modal.type==='shortage') {
                     col='shortages'; d={itemName:f.itemName.value, quantity:f.quantity.value, branchId:f.bId.value};
                     if(modal.mode !== 'edit') { d.requestedBy = user.name; d.timestamp = new Date().toISOString(); }
@@ -872,11 +1059,11 @@
 
                 if(modal.mode==='edit') {
                     db.collection(col).doc(modal.data.id).update(d)
-                      .then(() => { onClose(); showToast("تم التعديل بنجاح"); })
+                      .then(() => { saveCost(modal.data.id); onClose(); showToast("تم التعديل بنجاح"); })
                       .catch(err => showToast("مشكلة في التعديل! تفاصيل الخطأ: " + err.message));
                 } else {
                     db.collection(col).add(d)
-                      .then(() => { onClose(); showToast("تمت الإضافة بنجاح"); })
+                      .then(ref => { saveCost(ref.id); onClose(); showToast("تمت الإضافة بنجاح"); })
                       .catch(err => showToast("مشكلة في الإضافة! تفاصيل الخطأ: " + err.message));
                 }
             };
@@ -899,6 +1086,13 @@
                                             <Input name="tm" label="الوقت" type="time" defaultValue={modal.data?.time} required />
                                         </div>
                                         <Input name="service" label="الخدمة (اختياري)" defaultValue={modal.data?.service} />
+                                        <div className="space-y-1">
+                                            <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الطبيب (اختياري)</label>
+                                            <select name="docId" defaultValue={modal.data?.doctorId || ''} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
+                                                <option value="">غير محدد</option>
+                                                {staff.filter(s => s.role === 'doctor').map(s => <option key={s.id} value={s.id}>د. {s.name}</option>)}
+                                            </select>
+                                        </div>
                                         <div className="space-y-1">
                                             <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الفرع</label>
                                             <select name="bId" defaultValue={modal.data?.branchId || user.branchId} disabled={user.role === 'employee'} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
@@ -941,6 +1135,28 @@
                                         </div>
                                     </>
                                 )}
+                                {modal.type==='lab' && (
+                                    <>
+                                        <Input name="labName" label="اسم المعمل" list="labNamesList" defaultValue={modal.data?.labName} required />
+                                        <datalist id="labNamesList">{labNames.map(n => <option key={n} value={n} />)}</datalist>
+                                        <Input name="patientName" label="اسم المريض" defaultValue={modal.data?.patientName} required />
+                                        <Input name="caseType" label="نوع الحالة / الشغل" defaultValue={modal.data?.caseType} required />
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <Input name="sentDate" label="تاريخ التسليم للمعمل" type="date" defaultValue={modal.data?.sentDate || new Date().toISOString().split('T')[0]} required />
+                                            <Input name="dueDate" label="موعد الاستلام المتوقع" type="date" defaultValue={modal.data?.dueDate} />
+                                        </div>
+                                        {user.role === 'superadmin' && <Input name="cost" label="التكلفة (تظهر للسوبر أدمن فقط)" type="number" defaultValue={modal.data ? costs[modal.data.id] : ''} />}
+                                        <Input name="notes" label="ملاحظات" defaultValue={modal.data?.notes} />
+                                        {(user.role === 'admin' || user.role === 'superadmin') && (
+                                            <div className="space-y-1">
+                                                <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الفرع</label>
+                                                <select name="bId" defaultValue={modal.data?.branchId || (selectedBranch !== 'all' ? selectedBranch : '')} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
+                                                    {branches.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}
+                                                </select>
+                                            </div>
+                                        )}
+                                    </>
+                                )}
                                 {modal.type==='shortage' && (
                                     <>
                                         <Input name="itemName" label="اسم الصنف" defaultValue={modal.data?.itemName} required />
@@ -963,6 +1179,14 @@
                                     <>
                                         <Input name="name" label="اسم الموظف" defaultValue={modal.data?.name} required />
                                         <Input name="code" label="كود الدخول (4 أرقام)" defaultValue={modal.data?.code} type="tel" maxLength="4" required />
+                                        <div className="space-y-1">
+                                            <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الوظيفة</label>
+                                            <select name="jobTitle" defaultValue={modal.data?.jobTitle || modal.data?.kind || (modal.data?.role === 'doctor' ? 'طبيب' : 'سكرتارية')} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
+                                                <option value="سكرتارية">سكرتارية</option>
+                                                <option value="مساعد تمريض">مساعد تمريض</option>
+                                                <option value="طبيب">طبيب (يشوف الحجوزات فقط)</option>
+                                            </select>
+                                        </div>
                                         <div className="space-y-1">
                                             <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الصلاحية</label>
                                             <select name="bId" defaultValue={modal.data?.branchId || 'all'} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
@@ -1016,6 +1240,4 @@
     </script>
 </body>
 </html>
-
-
 
