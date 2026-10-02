@@ -198,7 +198,7 @@
                 const filter = (i) => branchId === 'all' || i.branchId === branchId;
                 return {
                     patients: data.patients.filter(filter),
-                    appointments: data.appointments.filter(filter).filter(a => currentUser?.role !== 'doctor' || !a.doctorId || a.doctorId === currentUser.id),
+                    appointments: data.appointments.filter(filter).filter(a => currentUser?.role !== 'doctor' || a.doctorId === currentUser.id),
                     payments: data.payments.filter(filter),
                     shortages: data.shortages.filter(filter),
                     labCases: data.labCases.filter(filter),
@@ -1087,9 +1087,9 @@
                                         </div>
                                         <Input name="service" label="الخدمة (اختياري)" defaultValue={modal.data?.service} />
                                         <div className="space-y-1">
-                                            <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الطبيب (اختياري)</label>
-                                            <select name="docId" defaultValue={modal.data?.doctorId || ''} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
-                                                <option value="">غير محدد</option>
+                                            <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الطبيب</label>
+                                            <select name="docId" required defaultValue={modal.data?.doctorId || ''} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
+                                                <option value="" disabled>اختر الطبيب...</option>
                                                 {staff.filter(s => s.role === 'doctor').map(s => <option key={s.id} value={s.id}>د. {s.name}</option>)}
                                             </select>
                                         </div>
