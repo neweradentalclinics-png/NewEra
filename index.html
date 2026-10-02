@@ -75,6 +75,8 @@
         const auth = firebase.auth();
         
         const MASTER_CODE = "1279";
+        // فروع الطبيب: القائمة الجديدة (branchIds) أو الفرع القديم (branchId)
+        const doctorBranchIds = (s, branches) => (Array.isArray(s.branchIds) && s.branchIds.length) ? s.branchIds : (s.branchId === 'all' ? branches.map(b => b.id) : [s.branchId]);
 
         // --- Icons ---
         const IconDashboard = () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="9"></rect><rect x="14" y="3" width="7" height="5"></rect><rect x="14" y="12" width="7" height="9"></rect><rect x="3" y="16" width="7" height="5"></rect></svg>;
@@ -186,7 +188,11 @@
                     if (found) {
                         setCurrentUser(found);
                         setIsLoggedIn(true);
-                        if (found.role === 'employee' || (found.role === 'doctor' && found.branchId !== 'all')) setSelectedBranch(found.branchId);
+                        if (found.role === 'employee') setSelectedBranch(found.branchId);
+                        else if (found.role === 'doctor') {
+                            const ids = (Array.isArray(found.branchIds) && found.branchIds.length) ? found.branchIds : (found.branchId && found.branchId !== 'all' ? [found.branchId] : []);
+                            setSelectedBranch(ids.length === 1 ? ids[0] : 'all');
+                        }
                         return true;
                     }
                 }
@@ -194,8 +200,12 @@
             };
 
             const filteredData = useMemo(() => {
-                const branchId = (currentUser?.role === 'employee' || (currentUser?.role === 'doctor' && currentUser.branchId !== 'all')) ? currentUser.branchId : selectedBranch;
-                const filter = (i) => branchId === 'all' || i.branchId === branchId;
+                const isDocUser = currentUser?.role === 'doctor';
+                const docBr = isDocUser ? doctorBranchIds(currentUser, data.branches) : [];
+                const branchId = currentUser?.role === 'employee' ? currentUser.branchId : selectedBranch;
+                const filter = isDocUser
+                    ? (i) => docBr.includes(i.branchId) && (branchId === 'all' || i.branchId === branchId)
+                    : (i) => branchId === 'all' || i.branchId === branchId;
                 return {
                     patients: data.patients.filter(filter),
                     appointments: data.appointments.filter(filter).filter(a => currentUser?.role !== 'doctor' || a.doctorId === currentUser.id),
@@ -211,6 +221,7 @@
             const isSuperAdmin = currentUser.role === 'superadmin';
             const isAdminOrSuper = currentUser.role === 'admin' || currentUser.role === 'superadmin';
             const isDoctor = currentUser.role === 'doctor';
+            const doctorBranches = isDoctor ? doctorBranchIds(currentUser, data.branches) : [];
 
             return (
                 <div className="flex h-screen overflow-hidden text-gray-800 bg-[#FDFCFB] relative">
@@ -269,6 +280,12 @@
                                     <select value={selectedBranch} onChange={(e) => setSelectedBranch(e.target.value)} className="bg-gray-50 border border-gray-200 text-[10px] sm:text-xs font-bold p-1.5 sm:p-2.5 rounded-xl outline-none cursor-pointer focus:border-gold-500 max-w-[100px] sm:max-w-none">
                                         <option value="all">كل الفروع</option>
                                         {data.branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+                                    </select>
+                                )}
+                                {isDoctor && doctorBranches.length > 1 && (
+                                    <select value={selectedBranch} onChange={(e) => setSelectedBranch(e.target.value)} className="bg-gray-50 border border-gray-200 text-[10px] sm:text-xs font-bold p-1.5 sm:p-2.5 rounded-xl outline-none cursor-pointer focus:border-gold-500 max-w-[100px] sm:max-w-none">
+                                        <option value="all">كل فروعي</option>
+                                        {doctorBranches.map(id => <option key={id} value={id}>{data.branches.find(b => b.id === id)?.name || id}</option>)}
                                     </select>
                                 )}
                                 <div className="text-left hidden sm:block pr-4 border-r border-gray-200">
@@ -886,7 +903,7 @@
                         <button type="button" onClick={() => setTab('staff')} className={`flex-1 px-4 py-1.5 text-xs font-bold rounded-lg ${tab === 'staff' ? 'bg-white shadow text-gold-600' : 'text-gray-500'}`}>سكرتارية / تمريض</button>
                         <button type="button" onClick={() => setTab('doctors')} className={`flex-1 px-4 py-1.5 text-xs font-bold rounded-lg ${tab === 'doctors' ? 'bg-white shadow text-gold-600' : 'text-gray-500'}`}>الأطباء</button>
                     </div>
-                    {tab === 'doctors' && <p className="text-[10px] text-gray-400 font-bold">الطبيب يدخل بكوده ويشوف الحجوزات فقط، ويقدر يغيّر حالة الحجز.</p>}
+                    {tab === 'doctors' && <p className="text-[10px] text-gray-400 font-bold">الطبيب يدخل بكوده ويشوف حجوزاته فقط، ويقدر يغيّر حالة الحجز. ممكن تختاري له أكتر من فرع بكود واحد.</p>}
                     <div className="bg-white rounded-[20px] border border-gray-100 overflow-hidden shadow-sm w-full overflow-x-auto">
                         <table className="w-full text-right text-[10px] min-w-[380px]">
                             <thead className="bg-gray-50 text-gray-500 border-b"><tr><th className="p-2">الاسم</th><th className="p-2">الوظيفة</th><th className="p-2 text-center">الكود</th><th className="p-2">الفرع</th><th className="p-2 text-center">أوامر</th></tr></thead>
@@ -895,7 +912,7 @@
                                     <td className="p-2 font-bold text-gray-800">{s.name}</td>
                                     <td className="p-2 text-gray-500">{s.jobTitle || (s.role === 'admin' ? 'مدير' : 'سكرتارية')}</td>
                                     <td className="p-2 text-center font-mono font-black text-gold-600 text-xs tracking-widest">{s.code}</td>
-                                    <td className="p-2 text-gray-500">{s.branchId === 'all' ? 'كل الفروع' : branches.find(b => b.id === s.branchId)?.name}</td>
+                                    <td className="p-2 text-gray-500">{s.role === 'doctor' ? doctorBranchIds(s, branches).map(id => branches.find(b => b.id === id)?.name).filter(Boolean).join('، ') : (s.branchId === 'all' ? 'كل الفروع' : branches.find(b => b.id === s.branchId)?.name)}</td>
                                     <td className="p-2 flex justify-center gap-1">
                                         <button type="button" onClick={() => onEdit(s)} className="p-1 text-gold-500 bg-white border border-gray-200 rounded hover:bg-gold-500 hover:text-white transition-colors"><IconEdit/></button>
                                         <button type="button" onClick={() => onConfirm({msg:'حذف الموظف نهائياً؟', onConfirm:()=>{
@@ -1033,6 +1050,8 @@
         }
 
         function DataModal({ modal, branches, user, selectedBranch, onClose, showToast, staff = [], costs = {}, labNames = [] }) {
+            const [appBranch, setAppBranch] = useState(modal.data?.branchId || (user.role === 'employee' ? user.branchId : (selectedBranch !== 'all' ? selectedBranch : (branches[0]?.id || ''))));
+            const [jobTitle, setJobTitle] = useState(modal.data?.jobTitle || modal.data?.kind || (modal.data?.role === 'doctor' ? 'طبيب' : 'سكرتارية'));
             const save = (e) => {
                 e.preventDefault();
                 const f = e.target;
@@ -1042,7 +1061,14 @@
                 if(modal.type==='app') {
                     col='appointments'; const doc = staff.find(s => s.id === f.docId.value); d={patientName:f.pName.value, phone:f.phone.value, date:f.dt.value, time:f.tm.value, service:f.service.value, branchId:f.bId.value, recordedBy:user.name, doctorId: doc ? doc.id : '', doctorName: doc ? doc.name : ''}; if(modal.mode!=='edit') d.status='booked';
                 } else if(modal.type==='staff') {
-                    col='staff_members'; d={name:f.name.value, code:f.code.value, branchId:f.bId.value, jobTitle:f.jobTitle.value, role: f.jobTitle.value==='طبيب' ? 'doctor' : (f.bId.value==='all'?'admin':'employee')};
+                    col='staff_members';
+                    if (f.jobTitle.value === 'طبيب') {
+                        const ids = Array.from(f.querySelectorAll('input[name="docBranch"]:checked')).map(x => x.value);
+                        if (ids.length === 0) { showToast("اختاري فرع واحد على الأقل للطبيب"); return; }
+                        d={name:f.name.value, code:f.code.value, branchId:ids[0], branchIds:ids, jobTitle:'طبيب', role:'doctor'};
+                    } else {
+                        d={name:f.name.value, code:f.code.value, branchId:f.bId.value, branchIds:[], jobTitle:f.jobTitle.value, role: f.bId.value==='all'?'admin':'employee'};
+                    }
                 } else if(modal.type==='patient') {
                     col='patients'; d={fileNo:f.fileNo.value, name:f.name.value, phone:f.phone.value, address:f.address.value, service:f.service.value, branchId:(user.role==='admin' || user.role==='superadmin')?f.bId.value:user.branchId, recordedBy:user.name};
                 } else if(modal.type==='payment') {
@@ -1088,14 +1114,20 @@
                                         <Input name="service" label="الخدمة (اختياري)" defaultValue={modal.data?.service} />
                                         <div className="space-y-1">
                                             <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الطبيب</label>
-                                            <select name="docId" required defaultValue={modal.data?.doctorId || ''} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
-                                                <option value="" disabled>اختر الطبيب...</option>
-                                                {staff.filter(s => s.role === 'doctor').map(s => <option key={s.id} value={s.id}>د. {s.name}</option>)}
-                                            </select>
+                                            {(() => {
+                                                const docs = staff.filter(x => x.role === 'doctor' && doctorBranchIds(x, branches).includes(appBranch));
+                                                const dv = docs.some(x => x.id === modal.data?.doctorId) ? modal.data.doctorId : '';
+                                                return (
+                                                    <select key={appBranch} name="docId" required defaultValue={dv} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
+                                                        <option value="" disabled>{docs.length === 0 ? 'لا يوجد أطباء في هذا الفرع' : 'اختر الطبيب...'}</option>
+                                                        {docs.map(x => <option key={x.id} value={x.id}>د. {x.name}</option>)}
+                                                    </select>
+                                                );
+                                            })()}
                                         </div>
                                         <div className="space-y-1">
                                             <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الفرع</label>
-                                            <select name="bId" defaultValue={modal.data?.branchId || user.branchId} disabled={user.role === 'employee'} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
+                                            <select name="bId" value={appBranch} onChange={(e) => setAppBranch(e.target.value)} disabled={user.role === 'employee'} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
                                                 {branches.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}
                                             </select>
                                         </div>
@@ -1181,19 +1213,33 @@
                                         <Input name="code" label="كود الدخول (4 أرقام)" defaultValue={modal.data?.code} type="tel" maxLength="4" required />
                                         <div className="space-y-1">
                                             <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الوظيفة</label>
-                                            <select name="jobTitle" defaultValue={modal.data?.jobTitle || modal.data?.kind || (modal.data?.role === 'doctor' ? 'طبيب' : 'سكرتارية')} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
+                                            <select name="jobTitle" value={jobTitle} onChange={(e) => setJobTitle(e.target.value)} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
                                                 <option value="سكرتارية">سكرتارية</option>
                                                 <option value="مساعد تمريض">مساعد تمريض</option>
-                                                <option value="طبيب">طبيب (يشوف الحجوزات فقط)</option>
+                                                <option value="طبيب">طبيب (يشوف حجوزاته فقط)</option>
                                             </select>
                                         </div>
-                                        <div className="space-y-1">
-                                            <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الصلاحية</label>
-                                            <select name="bId" defaultValue={modal.data?.branchId || 'all'} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
-                                                <option value="all">مدير عام (جميع الفروع)</option>
-                                                {branches.map(b=><option key={b.id} value={b.id}>موظف فرع: {b.name}</option>)}
-                                            </select>
-                                        </div>
+                                        {jobTitle === 'طبيب' ? (
+                                            <div className="space-y-1">
+                                                <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">فروع الطبيب (اختاري فرع أو أكتر)</label>
+                                                <div className="grid grid-cols-2 gap-2">
+                                                    {branches.map(b => (
+                                                        <label key={b.id} className="flex items-center gap-2 p-2.5 bg-gray-50 border border-gray-100 rounded-xl text-xs font-bold cursor-pointer">
+                                                            <input type="checkbox" name="docBranch" value={b.id} defaultChecked={modal.data?.role === 'doctor' && doctorBranchIds(modal.data, branches).includes(b.id)} className="w-4 h-4 accent-yellow-600" />
+                                                            {b.name}
+                                                        </label>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div className="space-y-1">
+                                                <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الصلاحية</label>
+                                                <select name="bId" defaultValue={modal.data?.role === 'doctor' ? 'all' : (modal.data?.branchId || 'all')} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
+                                                    <option value="all">مدير عام (جميع الفروع)</option>
+                                                    {branches.map(b=><option key={b.id} value={b.id}>موظف فرع: {b.name}</option>)}
+                                                </select>
+                                            </div>
+                                        )}
                                     </>
                                 )}
                                 {modal.type==='branch' && (
