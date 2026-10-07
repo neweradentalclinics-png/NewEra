@@ -89,7 +89,10 @@
             try { _ac = _ac || new (window.AudioContext || window.webkitAudioContext)(); const o = _ac.createOscillator(), g = _ac.createGain(); o.connect(g); g.connect(_ac.destination); o.frequency.value = 880; g.gain.value = 0.15; o.start(); o.stop(_ac.currentTime + 0.25); } catch (e) {}
             try { if ('Notification' in window && Notification.permission === 'granted') new Notification(text); } catch (e) {}
         };
-        const labDue = c => c.status !== 'returned' && !c.chasedAt && c.sentDate && (new Date(new Date().toISOString().split('T')[0]) - new Date(c.sentDate)) / 864e5 >= 2;
+        // مدة تذكير المعمل بالأيام (لو الحالة قديمة ومفيهاش مدة = يومين، 0 = بدون تذكير)
+        const labRemindDays = c => (c.remindDays === undefined || c.remindDays === null || c.remindDays === '') ? 2 : Number(c.remindDays);
+        const labDue = c => c.status !== 'returned' && !c.chasedAt && c.sentDate && labRemindDays(c) > 0 && (new Date(new Date().toISOString().split('T')[0]) - new Date(c.sentDate)) / 864e5 >= labRemindDays(c);
+        const daysLabel = n => ({ 1: 'يوم', 2: 'يومين', 3: '3 أيام', 5: '5 أيام', 7: 'أسبوع', 10: '10 أيام', 14: 'أسبوعين', 30: 'شهر' }[n] || n + ' يوم');
         const TPL_DEFAULT = {
             reminder: 'أهلاً {name} 👋\nتذكير بموعدك في {branch} يوم {date} الساعة {time}.\nبرجاء تأكيد الحضور، شكراً لثقتكم.',
             review: 'شكراً لزيارتك {branch} يا {name} 🌟\nرأيك يهمنا جداً، ممكن تقيّم تجربتك من هنا:\n{link}',
@@ -228,7 +231,7 @@
             };
             useEffect(() => { if (!alerts.length) return; const t = setTimeout(() => setAlerts([]), 12000); return () => clearTimeout(t); }, [alerts]);
             useEffect(() => { const h = () => { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); document.removeEventListener('click', h); }; document.addEventListener('click', h); return () => document.removeEventListener('click', h); }, []);
-            // تذكير المعمل بعد يومين (يظهر + تيليجرام مرة واحدة لكل حالة)
+            // تذكير المعمل بعد المدة المحددة لكل حالة (يظهر + تيليجرام مرة واحدة لكل حالة)
             useEffect(() => {
                 if (!currentUser || currentUser.role === 'doctor') return;
                 data.labCases.filter(c => labDue(c) && !c.remindSent && (currentUser.role !== 'employee' || c.branchId === currentUser.branchId)).forEach(c => {
@@ -236,7 +239,7 @@
                     db.runTransaction(async tx => { const sn = await tx.get(ref); if (!sn.exists || sn.data().remindSent) return false; tx.update(ref, { remindSent: true }); return true; }).then(won => {
                         if (!won) return;
                         const bn = data.branches.find(b => b.id === c.branchId)?.name || '';
-                        const text = `⏰ حالة معمل مر عليها يومين — اطلبيها من المعمل\nالمعمل: ${c.labName}\nالمريض: ${c.patientName}\nالنوع: ${c.caseType}\nالفرع: ${bn}`;
+                        const text = `⏰ حالة معمل مر عليها ${daysLabel(labRemindDays(c))} — اطلبيها من المعمل\nالمعمل: ${c.labName}\nالمريض: ${c.patientName}\nالنوع: ${c.caseType}\nالفرع: ${bn}`;
                         tgSend(text, bn);
                     }).catch(() => {});
                 });
@@ -247,9 +250,9 @@
                 const t = new Date().toISOString().split('T')[0];
                 const mine = x => x.branchId === currentUser.branchId;
                 const fresh = [
-                    ...data.patients.filter(p => p.followUpDate && !p.followedAt && p.followUpDate <= t && mine(p)).map(p => ({ id: 'pf' + p.id, text: '📞 متابعة: ' + p.name, tab: 'patients' })),
+                    ...data.patients.filter(p => p.followUpDate && !p.followedAt && p.followUpDate <= t && mine(p)).map(p => ({ id: 'pf' + p.id + p.followUpDate, text: '📞 متابعة: ' + p.name, tab: 'patients' })),
                     ...(data.appointments.some(a => mine(a) && (a.status === 'arrived' || a.status === 'done') && !a.reviewSent && !a.reviewSkipped && a.date <= t && a.date >= addDays(-3)) ? [{ id: 'rv' + t, text: '⭐ متنسيش تبعتي رسايل التقييم للمرضى', tab: 'appointments' }] : []),
-                    ...data.labCases.filter(c => labDue(c) && mine(c)).map(c => ({ id: 'lab' + c.id, text: '⏰ اطلبي من ' + c.labName + ': ' + c.patientName, tab: 'labs' }))
+                    ...data.labCases.filter(c => labDue(c) && mine(c)).map(c => ({ id: 'lab' + c.id + labRemindDays(c), text: '⏰ اطلبي من ' + c.labName + ': ' + c.patientName, tab: 'labs' }))
                 ].filter(x => !shownDue.current.has(x.id));
                 if (!fresh.length) return;
                 fresh.forEach(x => shownDue.current.add(x.id));
@@ -385,7 +388,7 @@
             const inScope = x => currentUser.role === 'admin' || currentUser.role === 'superadmin' || x.branchId === currentUser.branchId;
             const dueNotifs = currentUser.role !== 'employee' ? [] : [
                 ...data.patients.filter(p => p.followUpDate && !p.followedAt && p.followUpDate <= todayS && inScope(p)).map(p => ({ id: 'p' + p.id, kind: 'patient', refId: p.id, tab: 'patients', text: '📞 متابعة: ' + p.name + (svcText(p) ? ' — ' + svcText(p) : ''), ts: new Date(p.followUpDate).getTime(), wa: waUrl(p.phone, fillT('followup', { name: p.name, branch: bLabel(data.branches, p.branchId), service: svcText(p) })) })),
-                ...data.labCases.filter(c => labDue(c) && inScope(c)).map(c => ({ id: 'l' + c.id, kind: 'lab', refId: c.id, tab: 'labs', text: '⏰ اطلبي من ' + c.labName + ': ' + c.patientName, ts: new Date(c.sentDate).getTime() + 2 * 864e5, wa: waLink(c, labPhoneAll[c.labName]) }))
+                ...data.labCases.filter(c => labDue(c) && inScope(c)).map(c => ({ id: 'l' + c.id, kind: 'lab', refId: c.id, tab: 'labs', text: '⏰ اطلبي من ' + c.labName + ': ' + c.patientName, ts: new Date(c.sentDate).getTime() + labRemindDays(c) * 864e5, wa: waLink(c, labPhoneAll[c.labName]) }))
             ];
             const labPhoneAll = Object.fromEntries(data.labCases.filter(x => x.labPhone).sort((a, b) => (a.sentDate || '').localeCompare(b.sentDate || '')).map(x => [x.labName, x.labPhone]));
             const reviewRows = currentUser.role !== 'employee' ? [] : data.appointments
@@ -951,7 +954,7 @@
                                     {!p.followedAt && <div className="flex gap-1.5 flex-wrap">
                                         <WaMsg phone={p.phone} label="واتساب متابعة" text={fillT('followup', { name: p.name, branch: bn, service: svcText(p) })} />
                                         <button type="button" onClick={() => upd(p, { followedAt: new Date().toISOString() }, 'تم تسجيل المتابعة')} className="px-2 py-1.5 bg-emerald-500 text-white rounded-lg text-[9px] font-bold">تمت المتابعة</button>
-                                        <button type="button" onClick={() => upd(p, { followUpDate: addDays(7), followRemind: false }, 'اتأجلت أسبوع')} className="px-2 py-1.5 bg-gray-100 text-gray-600 rounded-lg text-[9px] font-bold">أجّل أسبوع</button>
+                                        <button type="button" onClick={() => upd(p, { followUpDate: addDays(7), followUpDays: 7, followedAt: '', followRemind: false }, 'اتأجلت أسبوع (التذكير الجاي ' + addDays(7) + ')')} className="px-2 py-1.5 bg-gray-100 text-gray-600 rounded-lg text-[9px] font-bold">أجّل أسبوع</button>
                                     </div>}
                                 </div>)}
                             {(currentUser.role === 'admin' || currentUser.role === 'superadmin') && p.recordedBy && <p className="mt-2 text-[8px] text-gray-400">سجّله: {p.recordedBy}</p>}
@@ -1267,7 +1270,7 @@
                     {tab === 'cases' && (<>
                         {cases.filter(labDue).length > 0 && (
                             <div className="bg-amber-50 border border-amber-200 rounded-[20px] p-3 space-y-2">
-                                <p className="text-xs font-black text-amber-700">⏰ حالات مر عليها يومين — اطلبيها من المعمل</p>
+                                <p className="text-xs font-black text-amber-700">⏰ حالات حان موعد تذكيرها — اطلبيها من المعمل</p>
                                 {cases.filter(labDue).map(c => (
                                     <div key={c.id} className="flex items-center justify-between gap-2 bg-white rounded-xl p-2">
                                         <p className="text-[11px] font-bold text-gray-800">{c.labName} • {c.patientName} • {c.caseType}{selectedBranch === 'all' ? ' • ' + (branches.find(b => b.id === c.branchId)?.name || '') : ''}</p>
@@ -1404,7 +1407,9 @@
                     col='branches'; d={name:f.name.value, phone:f.phone.value, address: f.address.value, mapsLink: f.mapsLink.value, reviewLink: f.reviewLink.value};
                 } else if(modal.type==='lab') {
                     col='lab_cases'; d={labName:f.labName.value.trim(), patientName:f.patientName.value, caseType:f.caseType.value, sentDate:f.sentDate.value, dueDate:f.dueDate.value, labPhone:f.labPhone.value.trim(), notes:f.notes.value, branchId:(user.role==='admin' || user.role==='superadmin')?f.bId.value:user.branchId};
+                    d.remindDays = Number(f.remindDays.value);
                     if(modal.mode!=='edit') { d.status='at_lab'; d.paid=false; d.recordedBy=user.name; }
+                    else if (d.remindDays !== labRemindDays(modal.data) || d.sentDate !== modal.data.sentDate) { d.chasedAt = ''; d.remindSent = false; }
                 } else if(modal.type==='due') {
                     col='dues';
                     d={party:f.party.value.trim(), desc:f.desc.value, amount:Number(f.amount.value||0), dueDate:f.dueDate.value, branchId:(user.role==='admin' || user.role==='superadmin')?f.bId.value:user.branchId};
@@ -1534,6 +1539,12 @@
                                         <div className="grid grid-cols-2 gap-2">
                                             <Input name="sentDate" label="تاريخ التسليم للمعمل" type="date" defaultValue={modal.data?.sentDate || new Date().toISOString().split('T')[0]} required />
                                             <Input name="dueDate" label="موعد الاستلام المتوقع" type="date" defaultValue={modal.data?.dueDate} />
+                                        </div>
+                                        <div className="space-y-1">
+                                            <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">تذكير بطلب الحالة من المعمل بعد</label>
+                                            <select name="remindDays" defaultValue={modal.data ? labRemindDays(modal.data) : 2} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
+                                                <option value="0">بدون تذكير</option><option value="1">يوم</option><option value="2">يومين</option><option value="3">3 أيام</option><option value="5">5 أيام</option><option value="7">أسبوع</option><option value="10">10 أيام</option><option value="14">أسبوعين</option><option value="30">شهر</option>
+                                            </select>
                                         </div>
                                         {user.role === 'superadmin' && <Input name="cost" label="التكلفة (تظهر للسوبر أدمن فقط)" type="number" defaultValue={modal.data ? costs[modal.data.id] : ''} />}
                                         <Input name="notes" label="ملاحظات" defaultValue={modal.data?.notes} />
