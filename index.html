@@ -98,10 +98,41 @@
             reminder: 'أهلاً {name} 👋\nتذكير بموعدك في {branch} يوم {date} الساعة {time}.\nبرجاء تأكيد الحضور، شكراً لثقتكم.',
             review: 'شكراً لزيارتك {branch} يا {name} 🌟\nرأيك يهمنا جداً، ممكن تقيّم تجربتك من هنا:\n{link}',
             followup: 'أهلاً {name}، معاك {branch} 👋\nحبينا نطمّن ونتابع معاك بخصوص {service}. تحب نحجزلك موعد؟',
-            lab: 'السلام عليكم، بخصوص حالة المريض {patient} ({case}) المُسلّمة لكم بتاريخ {date}. برجاء الإفادة بموعد التسليم.'
+            lab: 'السلام عليكم، بخصوص حالة المريض {patient} ({case}) المُسلّمة لكم بتاريخ {date}. برجاء الإفادة بموعد التسليم.',
+            tgApp: '📅 حجز جديد — فرع {branch}\nالمريض: {patient}\nالموعد: {date} {time}\nالخدمة: {service}\nالدكتور: {doctor}\nبواسطة: {by}\n\n📊 إجمالي حجوزات {date} في {branch}: {count}',
+            tgShortage: '⚠️ نقص جديد — {branch}\nالصنف: {item} ({qty})\nبواسطة: {by}\n\n📊 إجمالي النواقص في {branch}: {count}',
+            tgDue: '🧾 فاتورة جديدة — {branch}\nالجهة: {party}\nالمبلغ: {amount} ج\nموعد السداد: {due}\nبواسطة: {by}\n\n📊 إجمالي المستحق في {branch}: {sum} ج ({count} فاتورة)',
+            tgLab: '⏰ حالة معمل مر عليها {days} — اطلبيها من المعمل\nالمعمل: {lab}\nالمريض: {patient}\nالنوع: {case}\nالفرع: {branch}',
+            tgFollow: '📞 موعد متابعة مريض: {patient}\nالخدمة: {service}\nالفرع: {branch}'
+        };
+        const OLD_TG = {
+            tgApp: '📅 حجز جديد\nالمريض: {patient}\nالموعد: {date} {time}\nالخدمة: {service}\nالدكتور: {doctor}\nالفرع: {branch}\nبواسطة: {by}',
+            tgShortage: '⚠️ نقص جديد\nالصنف: {item} ({qty})\nالفرع: {branch}\nبواسطة: {by}',
+            tgDue: '🧾 فاتورة/مستحق جديد\nالجهة: {party}\nالمبلغ: {amount} ج\nموعد السداد: {due}\nالفرع: {branch}\nبواسطة: {by}'
         };
         const TPL = { ...TPL_DEFAULT };
         const fillT = (k, v) => String(TPL[k] || '').replace(/\{(\w+)\}/g, (m, x) => v[x] ?? '');
+        // بيانات حية لحساب الإجماليات في رسائل تيليجرام (بتتحدث من App)
+        const LIVE = { appointments: [], dues: [], shortages: [] };
+        const tgStats = (col, d, newId) => {
+            const arr = (LIVE[col] || []).filter(x => x.id !== newId);
+            const base = col === 'appointments' ? (x => x.date === d.date) : col === 'dues' ? (x => !x.paid) : (() => true);
+            const all = arr.filter(base), br = all.filter(x => x.branchId === d.branchId);
+            const r = { count: br.length + 1, countAll: all.length + 1 };
+            if (col === 'dues') {
+                const sm = a => Math.round(a.reduce((t, x) => t + (Number(x.amount) || 0), 0) * 100) / 100;
+                r.sum = sm(br) + (Number(d.amount) || 0); r.sumAll = sm(all) + (Number(d.amount) || 0);
+            }
+            return r;
+        };
+        const tgText = (col, d, bn, dn, by, newId) => {
+            const st = tgStats(col, d, newId), brn = d.branchId === 'store' ? 'المخزن' : bn;
+            return col === 'appointments'
+                ? fillT('tgApp', { patient: d.patientName, date: d.date, time: d.time || '', service: d.service || '', doctor: dn || '', branch: bn, by, ...st })
+                : col === 'dues'
+                    ? fillT('tgDue', { party: d.party, amount: d.amount, due: d.dueDate || 'بدون موعد', branch: brn, by, ...st })
+                    : fillT('tgShortage', { item: d.itemName, qty: d.quantity, branch: brn, by, ...st });
+        };
         const IS_ANDROID = /Android/i.test(navigator.userAgent);
         const WA_TARGET = IS_ANDROID ? '_self' : '_blank';
         // على أندرويد بيفتح واتساب بيزنيس مباشرة، وإلا بيرجع للرابط العادي (wa.me)
@@ -231,7 +262,7 @@
                                 <div className="divide-y divide-gray-100">
                                     {aggregated.map((group, idx) => (
                                         <div key={idx} className="hover:bg-gold-50/50 transition-colors group/notif">
-                                            <div className="flex items-start gap-3 p-4 cursor-pointer hover:bg-gold-50" onClick={() => handleNotifClick(group.items[0])}>
+                                            <div className="flex items-start gap-3 p-4 cursor-pointer hover:bg-gold-50" onClick={() => handleNotifClick({ ...group.items[0], refIds: group.items.map(i => i.refId || i.id) })}>
                                                 <div className="text-xl pt-0.5 shrink-0">{group.icon}</div>
                                                 <div className="flex-1 min-w-0">
                                                     <p className="text-[11px] font-black text-gray-800 line-clamp-2">{group.text}</p>
@@ -332,6 +363,7 @@
             const [events, setEvents] = useState([]);
             const [focus, setFocus] = useState(null);
             const userRef = useRef(null); userRef.current = currentUser;
+            LIVE.appointments = data.appointments; LIVE.dues = data.dues; LIVE.shortages = data.shortages;
             const firstSnap = useRef({});
             const evVisible = (kind, x, u) => {
                 if (kind === 'dues' && u.role !== 'admin' && u.role !== 'superadmin') return false;
@@ -351,7 +383,7 @@
                     text = `⚠️ نقص جديد: ${x.itemName} (${x.quantity})`;
                     category = 'shortages';
                 }
-                return { id, text, tab: kind, kind, category, branchId: x.branchId, ts: x.timestamp ? new Date(x.timestamp).getTime() : Date.now(), read: false, itemName: x.itemName || x.patientName || x.party };
+                return { id, refId: id, text, tab: kind, kind, category, branchId: x.branchId, ts: x.timestamp ? new Date(x.timestamp).getTime() : Date.now(), read: false, itemName: x.itemName || x.patientName || x.party };
             };
             const notify = (kind, s) => {
                 if (!firstSnap.current[kind]) { firstSnap.current[kind] = true; return; }
@@ -389,9 +421,6 @@
                         if (found.length) {
                             found.sort((a, b) => b.ts - a.ts);
                             setEvents(e => [...found, ...e].slice(0, 100));
-                            const msg = '🔔 وصلك ' + found.length + ' إشعار جديد وإنتِ بره التطبيق';
-                            setAlerts(a => [...a, { id: 'missed' + Date.now(), text: msg, tab: found[0].tab }]);
-                            pushLocal(msg);
                         }
                     }
                 }
@@ -407,7 +436,7 @@
                     db.runTransaction(async tx => { const sn = await tx.get(ref); if (!sn.exists || sn.data().remindSent) return false; tx.update(ref, { remindSent: true }); return true; }).then(won => {
                         if (!won) return;
                         const bn = data.branches.find(b => b.id === c.branchId)?.name || '';
-                        const text = `⏰ حالة معمل مر عليها ${daysLabel(labRemindDays(c))} — اطلبيها من المعمل\nالمعمل: ${c.labName}\nالمريض: ${c.patientName}\nالنوع: ${c.caseType}\nالفرع: ${bn}`;
+                        const text = fillT('tgLab', { days: daysLabel(labRemindDays(c)), lab: c.labName, patient: c.patientName, case: c.caseType, branch: bn });
                         tgSend(text, bn);
                     }).catch(() => {});
                 });
@@ -434,7 +463,7 @@
                     db.runTransaction(async tx => { const sn = await tx.get(ref); if (!sn.exists || sn.data().followRemind) return false; tx.update(ref, { followRemind: true }); return true; }).then(won => {
                         if (!won) return;
                         const bn = data.branches.find(b => b.id === p.branchId)?.name || '';
-                        const text = `📞 موعد متابعة مريض: ${p.name}\nالخدمة: ${svcText(p)}\nالفرع: ${bn}`;
+                        const text = fillT('tgFollow', { patient: p.name, service: svcText(p), branch: bn });
                         tgSend(text, bn);
                     }).catch(() => {});
                 });
@@ -494,7 +523,7 @@
                     err => console.error(err)
                 );
                 const unsub10 = db.collection('dues').onSnapshot(s => { notify('dues', s); setData(d => ({...d, dues: s.docs.map(x => ({id: x.id, ...x.data()}))})); }, err => console.error(err));
-                const unsub11 = db.collection('settings').doc('templates').onSnapshot(d => { if (d.exists) { Object.assign(TPL, d.data()); setTplVer(v => v + 1); } }, err => console.error(err));
+                const unsub11 = db.collection('settings').doc('templates').onSnapshot(d => { if (d.exists) { const dd = { ...d.data() }; Object.keys(OLD_TG).forEach(k => { if (dd[k] === OLD_TG[k]) delete dd[k]; }); Object.assign(TPL, dd); setTplVer(v => v + 1); } }, err => console.error(err));
                 return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); unsub6(); unsub7(); unsub8(); unsub10(); unsub11(); };
             }, []);
 
@@ -580,13 +609,13 @@
                     b.commit().then(() => setToastMsg(unit ? 'تم تسجيل الشراء في المستهلكات' : 'تم تسجيل الشراء — السعر 0، عدّليه من المستهلكات')).catch(err => setToastMsg('مشكلة: ' + err.message));
                 }
             });
-            const pickNotif = (n) => { navigateTo(n.tab); if (n.refId) { setFocus({ tab: n.tab, id: n.refId }); setTimeout(() => setFocus(null), 8000); } };
+            const pickNotif = (n) => { navigateTo(n.tab); const ids = n.refIds || (n.refId ? [n.refId] : []); if (ids.length) { if (isAdminOrSuper && selectedBranch !== 'all' && n.branchId !== selectedBranch) setSelectedBranch('all'); setFocus({ tab: n.tab, id: ids[0], ids }); setTimeout(() => setFocus(null), 8000); } };
             const doctorBranches = isDoctor ? doctorBranchIds(currentUser, data.branches) : [];
 
             return (
                 <div className="flex h-screen overflow-hidden text-gray-800 bg-[#FDFCFB] relative">
                     {/* التوست ورسائل التأكيد */}
-                    {alerts.length > 0 && <div className="fixed top-3 left-3 right-3 z-[999999] flex flex-col gap-2 max-w-md mx-auto">{alerts.slice(-1).map(a => <button key={a.id} type="button" onClick={() => { navigateTo(a.tab); setAlerts([]); }} className="bg-gray-900 text-white text-xs font-bold p-3 rounded-2xl shadow-2xl text-right animate-slide-up">{a.text}</button>)}</div>}
+                    {alerts.length > 0 && <div className="fixed top-3 left-3 right-3 z-[999999] flex flex-col gap-2 max-w-md mx-auto">{alerts.slice(-1).map(a => <button key={a.id} type="button" onClick={() => { pickNotif(a); setAlerts([]); }} className="bg-gray-900 text-white text-xs font-bold p-3 rounded-2xl shadow-2xl text-right animate-slide-up">{a.text}</button>)}</div>}
                     {toastMsg && <Toast msg={toastMsg} onClose={() => setToastMsg(null)} />}
                     {confirmAction && <ConfirmModal action={confirmAction} onClose={()=>setConfirmAction(null)} />}
                     {modal && <DataModal modal={modal} staff={data.staff} costs={costs} labNames={[...new Set(filteredData.labCases.map(c => c.labName).filter(Boolean))]} lastCosts={Object.fromEntries(data.consumables.filter(c => c.unitCost).sort((a, b) => (a.date || '').localeCompare(b.date || '')).map(c => [(c.itemName || '').trim().toLowerCase(), c.unitCost]))} labPhones={Object.fromEntries(filteredData.labCases.filter(c => c.labPhone).map(c => [c.labName, c.labPhone]))} branches={data.branches} user={currentUser} selectedBranch={selectedBranch} onClose={()=>setModal(null)} showToast={setToastMsg} />}
@@ -603,7 +632,7 @@
                     <div className={`fixed inset-y-0 right-0 z-50 bg-white border-l border-gold-400 shadow-2xl transition-transform duration-300 transform ${isSidebarOpen ? 'translate-x-0' : 'translate-x-full'} lg:relative lg:translate-x-0 w-72 h-full flex flex-col`}>
                         <div className="p-8 border-b border-gray-100 flex flex-col items-center relative shrink-0">
                             <img src="https://i.ibb.co/qLw7Tcqv/logo-Dr-shahenda-original.png" className="w-28 h-auto object-contain drop-shadow-sm mb-2" alt="Logo" />
-                            <span className="text-[9px] font-bold text-gray-300">نسخة 4.2</span>
+                            <span className="text-[9px] font-bold text-gray-300">نسخة 4.3</span>
                             <button type="button" onClick={() => setIsSidebarOpen(false)} className="absolute left-4 top-8 p-2 text-gray-400 bg-gray-50 rounded-full lg:hidden"><IconX /></button>
                         </div>
                         <nav className="flex-1 p-6 space-y-2 overflow-y-auto custom-scrollbar">
@@ -666,14 +695,14 @@
                         <div className="flex-1 p-3 md:p-8 overflow-y-auto w-full custom-scrollbar pb-20">
                             {activeTab === 'dashboard' && !isDoctor && <DashboardStats data={filteredData} userRole={currentUser.role} onNav={navigateTo} />}
                                                         {activeTab === 'patients' && <PatientsView staff={data.staff} focusId={focus?.tab === 'patients' ? focus.id : null} patients={filteredData.patients} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'patient', mode:'add'})} onEdit={(d)=>setModal({type:'patient', mode:'edit', data:d})} showToast={setToastMsg} />}
-                            {activeTab === 'appointments' && <AppointmentsView apps={filteredData.appointments} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'app', mode:'add'})} onEdit={(d)=>setModal({type:'app', mode:'edit', data:d})} onNav={navigateTo} showToast={setToastMsg} />}
+                            {activeTab === 'appointments' && <AppointmentsView focusIds={focus?.tab === 'appointments' ? focus.ids : null} apps={filteredData.appointments} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'app', mode:'add'})} onEdit={(d)=>setModal({type:'app', mode:'edit', data:d})} onNav={navigateTo} showToast={setToastMsg} />}
                             {activeTab === 'daily' && currentUser.role === 'employee' && <DailyView payments={data.payments} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'payment', mode:'add', data:{branchId:currentUser.branchId}})} onEdit={(d)=>setModal({type:'payment', mode:'edit', data:d})} showToast={setToastMsg} />}
                             {activeTab === 'finance' && isSuperAdmin && <FinanceView payments={filteredData.payments} branches={data.branches} selectedBranch={selectedBranch} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={(bId)=>setModal({type:'payment', mode:'add', data:{branchId:bId}})} onEdit={(d)=>setModal({type:'payment', mode:'edit', data:d})} showToast={setToastMsg} />}
                                                         {activeTab === 'labs' && <LabsView focusId={focus?.tab === 'labs' ? focus.id : null} cases={filteredData.labCases} costs={costs} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'lab', mode:'add'})} onEdit={(d)=>setModal({type:'lab', mode:'edit', data:d})} showToast={setToastMsg} />}
                             {activeTab === 'settings' && isAdminOrSuper && <SettingsView sections={[{ k: 'branches', label: 'الفروع', node: <BranchesView branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'branch', mode:'add'})} onEdit={(d)=>setModal({type:'branch', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'templates', label: 'قوالب الرسائل', node: <TemplatesView showToast={setToastMsg} /> }, ...(isSuperAdmin ? [{ k: 'staff', label: 'الموظفين', node: <StaffView staff={data.staff} branches={data.branches} onConfirm={setConfirmAction} onAdd={(k)=>setModal({type:'staff', mode:'add', data:{kind:k}})} onEdit={(d)=>setModal({type:'staff', mode:'edit', data:d})} showToast={setToastMsg} /> }] : [])]} />}
-                            {activeTab === 'dues' && !isDoctor && <DuesView items={filteredData.dues} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'due', mode:'add'})} onEdit={(d)=>setModal({type:'due', mode:'edit', data:d})} showToast={setToastMsg} />}
+                            {activeTab === 'dues' && !isDoctor && <DuesView focusIds={focus?.tab === 'dues' ? focus.ids : null} items={filteredData.dues} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'due', mode:'add'})} onEdit={(d)=>setModal({type:'due', mode:'edit', data:d})} showToast={setToastMsg} />}
                                                         {activeTab === 'consumables' && isAdminOrSuper && <ConsumablesView allItems={data.consumables} items={filteredData.consumables} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'consumable', mode:'add', data:{kind:'purchase'}})} onEdit={(d)=>setModal({type:'consumable', mode:'edit', data:d})} showToast={setToastMsg} />}
-                            {activeTab === 'shortages' && !isDoctor && <ShortagesView onBuy={(it)=> !isAdminOrSuper ? setConfirmAction({msg:'هل تم توفير وشراء هذا الصنف؟', onConfirm:()=>db.collection('shortages').doc(it.id).delete().then(()=>setToastMsg('تم')).catch(err=>setToastMsg('مشكلة: '+err.message))}) : quickBuy(it)} shortages={filteredData.shortages} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onEdit={(d)=>setModal({type:'shortage', mode:'edit', data:d})} showToast={setToastMsg} />}
+                            {activeTab === 'shortages' && !isDoctor && <ShortagesView focusIds={focus?.tab === 'shortages' ? focus.ids : null} onBuy={(it)=> !isAdminOrSuper ? setConfirmAction({msg:'هل تم توفير وشراء هذا الصنف؟', onConfirm:()=>db.collection('shortages').doc(it.id).delete().then(()=>setToastMsg('تم')).catch(err=>setToastMsg('مشكلة: '+err.message))}) : quickBuy(it)} shortages={filteredData.shortages} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onEdit={(d)=>setModal({type:'shortage', mode:'edit', data:d})} showToast={setToastMsg} />}
                         </div>
                     </div>
                 </div>
@@ -768,7 +797,7 @@
             );
         }
 
-        function ShortagesView({ onBuy, shortages, branches, currentUser, selectedBranch, onConfirm, onEdit, showToast }) {
+        function ShortagesView({ focusIds, onBuy, shortages, branches, currentUser, selectedBranch, onConfirm, onEdit, showToast }) {
             const [itemName, setItemName] = useState('');
             const [quantity, setQuantity] = useState('');
             const [branchId, setBranchId] = useState(currentUser.role === 'employee' ? currentUser.branchId : (selectedBranch === 'all' ? 'store' : selectedBranch));
@@ -786,11 +815,12 @@
                 return groups;
             }, [sortedShortages, selectedBranch]);
 
+            useEffect(() => { if (focusIds && focusIds.length) setTimeout(() => document.getElementById('short-' + focusIds[0])?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 300); }, [focusIds]);
             const handleAdd = (e) => {
                 e.preventDefault();
                 if (!itemName || !quantity) return;
                 db.collection('shortages').add({ itemName, quantity, branchId, requestedBy: currentUser.name, timestamp: new Date().toISOString() })
-                .then(() => { const bn = branches.find(b => b.id === branchId)?.name || ''; tgSend(`⚠️ نقص جديد\nالصنف: ${itemName} (${quantity})\nالفرع: ${branchId === 'store' ? 'المخزن' : bn}\nبواسطة: ${currentUser.name}`, bn); setItemName(''); setQuantity(''); showToast("تم إضافة الصنف للمخزن"); })
+                .then(ref => { const bn = branches.find(b => b.id === branchId)?.name || ''; tgSend(tgText('shortages', { itemName, quantity, branchId }, bn, '', currentUser.name, ref.id), bn); setItemName(''); setQuantity(''); showToast("تم إضافة الصنف للمخزن"); })
                 .catch(err => showToast("مشكلة في إضافة صنف: " + err.message));
             };
 
@@ -838,7 +868,7 @@
                                             {bShortages.map(item => {
                                                 const d = new Date(item.timestamp).toLocaleDateString('en-GB');
                                                 return (
-                                                    <div key={item.id} className="flex flex-col sm:flex-row justify-between items-start sm:items-center p-3 bg-gray-50 rounded-xl border border-gray-100 gap-3">
+                                                    <div key={item.id} id={'short-' + item.id} className={`flex flex-col sm:flex-row justify-between items-start sm:items-center p-3 rounded-xl border gap-3 ${focusIds?.includes(item.id) ? 'bg-gold-50 border-gold-500 ring-2 ring-gold-400' : 'bg-gray-50 border-gray-100'}`}>
                                                         <div>
                                                             <div className="flex items-center gap-2">
                                                                 <span className="font-black text-gray-800 text-xs sm:text-sm">{item.itemName}</span>
@@ -875,9 +905,10 @@
         }
 
         // --- المواعيد ---
-        function AppointmentsView({ apps, branches, currentUser, selectedBranch, onConfirm, onAdd, onEdit, onNav, showToast }) {
+        function AppointmentsView({ focusIds, apps, branches, currentUser, selectedBranch, onConfirm, onAdd, onEdit, onNav, showToast }) {
             const [viewMode, setViewMode] = useState('daily'); 
             const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+            useEffect(() => { if (!focusIds || !focusIds.length) return; const a = apps.find(x => focusIds.includes(x.id)); if (a && a.date) { setSelectedDate(a.date); setViewMode('daily'); } setTimeout(() => document.getElementById('app-' + (a ? a.id : ''))?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 350); }, [focusIds]);
 
             const filteredApps = useMemo(() => {
                 let list = apps.filter(a => selectedBranch === 'all' || a.branchId === selectedBranch);
@@ -1005,7 +1036,7 @@
                                             )}
                                             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
                                                 {bApps.map(a => (
-                                                    <div key={a.id} className="bg-white p-2.5 rounded-xl border border-gray-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2 hover:bg-gray-50 transition-colors shadow-sm">
+                                                    <div key={a.id} id={'app-' + a.id} className={`bg-white p-2.5 rounded-xl border ${focusIds?.includes(a.id) ? 'border-gold-500 ring-2 ring-gold-400' : 'border-gray-100'} flex flex-col sm:flex-row sm:items-center justify-between gap-2 hover:bg-gray-50 transition-colors shadow-sm`}>
                                                         <div className="flex items-center gap-2 min-w-0">
                                                             <div className="bg-gold-50 text-gold-700 px-2 py-1 rounded-lg text-[10px] font-black shrink-0 tracking-widest">{a.time || '00:00'}</div>
                                                             <div className="min-w-0">
@@ -1165,10 +1196,11 @@
             );
         }
 
-        function DuesView({ items, branches, currentUser, onConfirm, onAdd, onEdit, showToast }) {
+        function DuesView({ focusIds, items, branches, currentUser, onConfirm, onAdd, onEdit, showToast }) {
             const t = new Date().toISOString().split('T')[0];
             const isAdm = currentUser.role === 'admin' || currentUser.role === 'superadmin';
             const [f, setF] = useState(isAdm ? 'pending' : 'all');
+            useEffect(() => { if (focusIds && focusIds.length) setTimeout(() => document.getElementById('due-' + focusIds[0])?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 300); }, [focusIds]);
             const list = items.filter(d => f === 'all' || (f === 'paid' ? d.paid : !d.paid)).sort((a, b) => (a.dueDate || '9').localeCompare(b.dueDate || '9'));
             const pend = items.filter(d => !d.paid), over = pend.filter(d => d.dueDate && d.dueDate < t);
             const sum = a => a.reduce((s, d) => s + (Number(d.amount) || 0), 0);
@@ -1186,7 +1218,7 @@
                     <BranchGroups items={list} branches={branches} empty="لا توجد مستحقات." sub={arr => isAdm ? '• ' + sum(arr.filter(d => !d.paid)) + ' ج مستحق' : 'فاتورة'} render={d => {
                         const late = !d.paid && d.dueDate && d.dueDate < t;
                         return (
-                        <div key={d.id} className={`bg-white p-4 rounded-[20px] border shadow-sm relative ${late ? 'border-red-300' : 'border-gray-100'}`}>
+                        <div key={d.id} id={'due-' + d.id} className={`bg-white p-4 rounded-[20px] border shadow-sm relative ${focusIds?.includes(d.id) ? 'border-gold-500 ring-2 ring-gold-400' : late ? 'border-red-300' : 'border-gray-100'}`}>
                             <div className="absolute top-3 left-3 flex gap-1">
                                 <button type="button" onClick={() => onEdit(d)} className="p-1.5 text-gold-500 bg-gray-50 rounded-lg"><IconEdit/></button>
                                 {isAdm && <button type="button" onClick={() => onConfirm({ msg: 'حذف المستحق؟', onConfirm: () => db.collection('dues').doc(d.id).delete().then(() => showToast('تم الحذف')).catch(e => showToast(e.message)) })} className="p-1.5 text-red-500 bg-red-50 rounded-lg"><IconTrash/></button>}
@@ -1203,19 +1235,24 @@
 
         function TemplatesView({ showToast }) {
             const [v, setV] = useState(() => ({ ...TPL }));
-            const L = { reminder: ['تذكير الموعد', '{name} {branch} {date} {time}'], review: ['طلب التقييم', '{name} {branch} {link}'], followup: ['متابعة المريض', '{name} {branch} {service}'], lab: ['رسالة المعمل', '{patient} {case} {date}'] };
+            const WA = { reminder: ['تذكير الموعد', '{name} {branch} {date} {time}'], review: ['طلب التقييم', '{name} {branch} {link}'], followup: ['متابعة المريض', '{name} {branch} {service}'], lab: ['رسالة المعمل', '{patient} {case} {date}'] };
+            const TG_L = { tgApp: ['حجز جديد', '{patient} {date} {time} {service} {doctor} {branch} {by} | {count} = حجوزات نفس اليوم في الفرع، {countAll} = كل الفروع'], tgShortage: ['نقص جديد', '{item} {qty} {branch} {by} | {count} = نواقص الفرع، {countAll} = كل الفروع'], tgDue: ['فاتورة / مستحق جديد', '{party} {amount} {due} {branch} {by} | {sum} = إجمالي المستحق للفرع، {count} = عدد الفواتير، {sumAll} و{countAll} = كل الفروع'], tgLab: ['تذكير المعمل', '{days} {lab} {patient} {case} {branch}'], tgFollow: ['موعد متابعة مريض', '{patient} {service} {branch}'] };
             const save = () => db.collection('settings').doc('templates').set(v).then(() => showToast('تم حفظ الرسائل')).catch(e => showToast(e.message));
+            const block = (obj) => Object.entries(obj).map(([k, [title, vars]]) => (
+                <div key={k} className="bg-white p-4 rounded-[20px] border border-gray-100 shadow-sm space-y-1">
+                    <label className="text-xs font-black text-gray-700">{title}</label>
+                    <p className="text-[9px] text-gray-400 font-bold" dir="ltr">{vars}</p>
+                    <textarea rows="4" value={v[k] ?? ''} onChange={e => setV({ ...v, [k]: e.target.value })} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl text-xs font-bold outline-none focus:border-gold-500" />
+                    <button type="button" onClick={() => setV({ ...v, [k]: TPL_DEFAULT[k] })} className="text-[10px] text-gray-400 font-bold">استرجاع النص الأصلي</button>
+                </div>));
             return (
                 <div className="space-y-4 w-full animate-fade-in">
                     <h3 className="text-lg font-black text-gray-800">قوالب الرسائل (واتساب)</h3>
                     <p className="text-[10px] font-bold text-gray-400">عدّلي النص، والكلمات بين أقواس {'{ }'} بتتبدل تلقائي. رابط التقييم بيتحط من خانة "رابط التقييم" في بيانات كل فرع.</p>
-                    {Object.entries(L).map(([k, [title, vars]]) => (
-                        <div key={k} className="bg-white p-4 rounded-[20px] border border-gray-100 shadow-sm space-y-1">
-                            <label className="text-xs font-black text-gray-700">{title}</label>
-                            <p className="text-[9px] text-gray-400 font-bold" dir="ltr">{vars}</p>
-                            <textarea rows="4" value={v[k]} onChange={e => setV({ ...v, [k]: e.target.value })} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl text-xs font-bold outline-none focus:border-gold-500" />
-                            <button type="button" onClick={() => setV({ ...v, [k]: TPL_DEFAULT[k] })} className="text-[10px] text-gray-400 font-bold">استرجاع النص الأصلي</button>
-                        </div>))}
+                    {block(WA)}
+                    <h3 className="text-lg font-black text-gray-800 pt-2">رسائل تيليجرام (إشعارات الإدارة)</h3>
+                    <p className="text-[10px] font-bold text-gray-400">دي الرسائل اللي بتوصلك على تيليجرام. {'{by}'} هو اسم اللي سجّل. لو مسحتي كلمة من الأقواس بتختفي من الرسالة.</p>
+                    {block(TG_L)}
                     <button type="button" onClick={save} className="w-full bg-gold-500 text-white py-3 rounded-xl font-black text-sm shadow-md">حفظ الرسائل</button>
                 </div>
             );
@@ -1657,7 +1694,7 @@
                     db.collection(col).add(d)
                       .then(ref => { saveCost(ref.id);
                           if (col === 'appointments' || col === 'shortages' || col === 'dues') { const bn = branches.find(b => b.id === d.branchId)?.name || ''; const dn = staff.find(x => x.id === d.doctorId)?.name;
-                              tgSend(col === 'appointments' ? `📅 حجز جديد\nالمريض: ${d.patientName}\nالموعد: ${d.date} ${d.time || ''}\nالخدمة: ${d.service || ''}${dn ? '\nالدكتور: ' + dn : ''}\nالفرع: ${bn}\nبواسطة: ${user.name}` : col === 'dues' ? `🧾 فاتورة/مستحق جديد\nالجهة: ${d.party}\nالمبلغ: ${d.amount} ج${d.dueDate ? '\nموعد السداد: ' + d.dueDate : ''}\nالفرع: ${d.branchId === 'store' ? 'المخزن' : bn}\nبواسطة: ${user.name}` : `⚠️ نقص جديد\nالصنف: ${d.itemName} (${d.quantity})\nالفرع: ${bn}\nبواسطة: ${user.name}`, bn); }
+                              tgSend(tgText(col, d, bn, dn, user.name, ref.id), bn); }
                           if (modal.data?.fromShortage) db.collection('shortages').doc(modal.data.fromShortage).delete().catch(()=>{}); onClose(); showToast("تمت الإضافة بنجاح"); })
                       .catch(err => showToast("مشكلة في الإضافة! تفاصيل الخطأ: " + err.message));
                 }
