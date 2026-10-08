@@ -78,7 +78,7 @@
         // فروع الطبيب: القائمة الجديدة (branchIds) أو الفرع القديم (branchId)
         // ===== التنبيهات المجانية =====
         // تيليجرام: ضعي توكن البوت (من @BotFather) وأرقام الشات (chat_id) هنا. المفتاح = اسم الفرع كما هو مكتوب في التطبيق.
-        const TG = { token: '', main: '', branches: { /* 'فيصل': 'CHAT_ID', 'حلوان': 'CHAT_ID' */ } };
+        const TG = { token: '8563202107:AAFaCbaavRp-CK6dihDPWSY9tpYX56QakIA', main: '8017153450', branches: { /* 'فيصل': 'CHAT_ID', 'حلوان': 'CHAT_ID' */ } };
         const tgSend = (text, branchName) => {
             if (!TG.token) return;
             [...new Set([TG.main, TG.branches[branchName]].filter(Boolean))].forEach(chat =>
@@ -90,6 +90,7 @@
             try { if ('Notification' in window && Notification.permission === 'granted') new Notification(text); } catch (e) {}
         };
         // مدة تذكير المعمل بالأيام (لو الحالة قديمة ومفيهاش مدة = يومين، 0 = بدون تذكير)
+        const localDay = () => new Date().toLocaleDateString('en-CA');
         const labRemindDays = c => (c.remindDays === undefined || c.remindDays === null || c.remindDays === '') ? 2 : Number(c.remindDays);
         const labDue = c => c.status !== 'returned' && !c.chasedAt && c.sentDate && labRemindDays(c) > 0 && (new Date(new Date().toISOString().split('T')[0]) - new Date(c.sentDate)) / 864e5 >= labRemindDays(c);
         const daysLabel = n => ({ 1: 'يوم', 2: 'يومين', 3: '3 أيام', 5: '5 أيام', 7: 'أسبوع', 10: '10 أيام', 14: 'أسبوعين', 30: 'شهر' }[n] || n + ' يوم');
@@ -332,30 +333,70 @@
             const [focus, setFocus] = useState(null);
             const userRef = useRef(null); userRef.current = currentUser;
             const firstSnap = useRef({});
+            const evVisible = (kind, x, u) => {
+                if (kind === 'dues' && u.role !== 'admin' && u.role !== 'superadmin') return false;
+                if (u.role === 'employee' && x.branchId !== u.branchId) return false;
+                if (u.role === 'doctor' && !(kind === 'appointments' && x.doctorId === u.id)) return false;
+                return true;
+            };
+            const mkEv = (kind, id, x) => {
+                let text, category;
+                if (kind === 'appointments') {
+                    text = `📅 حجز جديد: ${x.patientName} — ${x.date} ${x.time || ''}`;
+                    category = 'bookings';
+                } else if (kind === 'dues') {
+                    text = `🧾 فاتورة/مستحق جديد: ${x.party} — ${Number(x.amount) || 0} ج`;
+                    category = 'invoices';
+                } else {
+                    text = `⚠️ نقص جديد: ${x.itemName} (${x.quantity})`;
+                    category = 'shortages';
+                }
+                return { id, text, tab: kind, kind, category, branchId: x.branchId, ts: x.timestamp ? new Date(x.timestamp).getTime() : Date.now(), read: false, itemName: x.itemName || x.patientName || x.party };
+            };
             const notify = (kind, s) => {
                 if (!firstSnap.current[kind]) { firstSnap.current[kind] = true; return; }
                 const u = userRef.current; if (!u) return;
                 s.docChanges().forEach(ch => {
                     if (ch.type !== 'added' || ch.doc.metadata.hasPendingWrites) return;
                     const x = ch.doc.data();
-                    if (kind === 'dues' && u.role !== 'admin' && u.role !== 'superadmin') return;
-                    if (u.role === 'employee' && x.branchId !== u.branchId) return;
-                    if (u.role === 'doctor' && !(kind === 'appointments' && x.doctorId === u.id)) return;
-                    let text, category;
-                    if (kind === 'appointments') {
-                        text = `📅 حجز جديد: ${x.patientName} — ${x.date} ${x.time || ''}`;
-                        category = 'bookings';
-                    } else if (kind === 'dues') {
-                        text = `🧾 فاتورة/مستحق جديد: ${x.party} — ${Number(x.amount) || 0} ج`;
-                        category = 'invoices';
-                    } else {
-                        text = `⚠️ نقص جديد: ${x.itemName} (${x.quantity})`;
-                        category = 'shortages';
-                    }
-                    const ev = { id: ch.doc.id, text, tab: kind, kind, category, branchId: x.branchId, ts: Date.now(), read: false, itemName: x.itemName || x.patientName || x.party };
-                    setAlerts(a => [...a, ev]); setEvents(e => [ev, ...e].slice(0, 100)); pushLocal(text);
+                    if (!evVisible(kind, x, u)) return;
+                    const ev = mkEv(kind, ch.doc.id, x);
+                    setAlerts(a => [...a, ev]); setEvents(e => [ev, ...e].slice(0, 100)); pushLocal(ev.text);
                 });
             };
+            // إشعارات اللي وصلت والتطبيق مقفول: بنحفظ الـ IDs اللي الجهاز شافها، وأول ما يتفتح ويسجل دخول بنقارن
+            const missedDone = useRef({});
+            useEffect(() => {
+                const u = currentUser; if (!u) return;
+                const fs = firstSnap.current;
+                if (!fs.appointments || !fs.dues || !fs.shortages) return;
+                const key = 'clinic_seen_' + (u.id || u.name);
+                const cols = { appointments: data.appointments, dues: data.dues, shortages: data.shortages };
+                if (!missedDone.current[key]) {
+                    missedDone.current[key] = true;
+                    let seen = null;
+                    try { seen = JSON.parse(localStorage.getItem(key) || 'null'); } catch (e) {}
+                    if (seen) {
+                        const found = [];
+                        Object.entries(cols).forEach(([k, arr]) => {
+                            if (!Array.isArray(seen[k])) return;
+                            const ids = new Set(seen[k]);
+                            arr.forEach(x => {
+                                if (ids.has(x.id) || !evVisible(k, x, u)) return;
+                                found.push(mkEv(k, x.id, x));
+                            });
+                        });
+                        if (found.length) {
+                            found.sort((a, b) => b.ts - a.ts);
+                            setEvents(e => [...found, ...e].slice(0, 100));
+                            const msg = '🔔 وصلك ' + found.length + ' إشعار جديد وإنتِ بره التطبيق';
+                            setAlerts(a => [...a, { id: 'missed' + Date.now(), text: msg, tab: found[0].tab }]);
+                            pushLocal(msg);
+                        }
+                    }
+                }
+                try { localStorage.setItem(key, JSON.stringify({ appointments: data.appointments.map(x => x.id), dues: data.dues.map(x => x.id), shortages: data.shortages.map(x => x.id) })); } catch (e) {}
+            }, [data.appointments, data.dues, data.shortages, currentUser]);
             useEffect(() => { if (!alerts.length) return; const t = setTimeout(() => setAlerts([]), 12000); return () => clearTimeout(t); }, [alerts]);
             useEffect(() => { const h = () => { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); document.removeEventListener('click', h); }; document.addEventListener('click', h); return () => document.removeEventListener('click', h); }, []);
             // تذكير المعمل بعد المدة المحددة لكل حالة (يظهر + تيليجرام مرة واحدة لكل حالة)
@@ -525,6 +566,20 @@
             const markReview = (id, field) => db.collection('appointments').doc(id).update(field === 'reviewSent' ? { reviewSent: true, reviewSentAt: new Date().toISOString(), reviewSentBy: currentUser.name } : { reviewSkipped: true }).catch(e => setToastMsg('مشكلة: ' + e.message));
             const notifItems = [...events, ...dueNotifs].sort((a, b) => b.ts - a.ts);
             const unreadCount = dueNotifs.length + reviewRows.length + events.filter(e => !e.read).length;
+            const quickBuy = (it) => setConfirmAction({
+                msg: 'تسجيل شراء "' + it.itemName + '" (' + it.quantity + ') وإزالته من النواقص؟',
+                onConfirm: () => {
+                    const key = (it.itemName || '').trim().toLowerCase();
+                    const last = data.consumables.filter(c => c.unitCost && (c.itemName || '').trim().toLowerCase() === key).sort((a, b) => (a.date || '').localeCompare(b.date || '')).pop();
+                    const unit = last ? Number(last.unitCost) : 0;
+                    const q = parseFloat(it.quantity) || 0;
+                    const day = new Date().toISOString().split('T')[0];
+                    const b = db.batch();
+                    b.set(db.collection('consumables').doc(), { kind: 'purchase', itemName: (it.itemName || '').trim(), qty: it.quantity, unitCost: unit, amount: Math.round(unit * q * 100) / 100, date: day, month: day.slice(0, 7), note: '', branchId: it.branchId || 'store', source: 'auto', recordedBy: currentUser.name });
+                    b.delete(db.collection('shortages').doc(it.id));
+                    b.commit().then(() => setToastMsg(unit ? 'تم تسجيل الشراء في المستهلكات' : 'تم تسجيل الشراء — السعر 0، عدّليه من المستهلكات')).catch(err => setToastMsg('مشكلة: ' + err.message));
+                }
+            });
             const pickNotif = (n) => { navigateTo(n.tab); if (n.refId) { setFocus({ tab: n.tab, id: n.refId }); setTimeout(() => setFocus(null), 8000); } };
             const doctorBranches = isDoctor ? doctorBranchIds(currentUser, data.branches) : [];
 
@@ -548,6 +603,7 @@
                     <div className={`fixed inset-y-0 right-0 z-50 bg-white border-l border-gold-400 shadow-2xl transition-transform duration-300 transform ${isSidebarOpen ? 'translate-x-0' : 'translate-x-full'} lg:relative lg:translate-x-0 w-72 h-full flex flex-col`}>
                         <div className="p-8 border-b border-gray-100 flex flex-col items-center relative shrink-0">
                             <img src="https://i.ibb.co/qLw7Tcqv/logo-Dr-shahenda-original.png" className="w-28 h-auto object-contain drop-shadow-sm mb-2" alt="Logo" />
+                            <span className="text-[9px] font-bold text-gray-300">نسخة 4.2</span>
                             <button type="button" onClick={() => setIsSidebarOpen(false)} className="absolute left-4 top-8 p-2 text-gray-400 bg-gray-50 rounded-full lg:hidden"><IconX /></button>
                         </div>
                         <nav className="flex-1 p-6 space-y-2 overflow-y-auto custom-scrollbar">
@@ -557,6 +613,7 @@
                             {!isDoctor && <SidebarItem icon={<IconClipboard/>} label="النواقص" active={activeTab === 'shortages'} onClick={() => navigateTo('shortages')} />}
                             <SidebarItem icon={<IconFlask/>} label="المعامل" active={activeTab === 'labs'} onClick={() => navigateTo('labs')} />
                             {currentUser.role === 'employee' && <SidebarItem icon={<IconWallet/>} label="الفواتير" active={activeTab === 'dues'} onClick={() => navigateTo('dues')} />}
+                            {currentUser.role === 'employee' && <SidebarItem icon={<IconWallet/>} label="توريد اليوم" active={activeTab === 'daily'} onClick={() => navigateTo('daily')} />}
                             {isAdminOrSuper && <div className="px-3 pt-4 pb-1 text-[9px] font-black text-gray-400 tracking-widest">الإدارة</div>}
                             {isAdminOrSuper && <SidebarItem icon={<IconWallet/>} label="المستهلكات الشهرية" active={activeTab === 'consumables'} onClick={() => navigateTo('consumables')} />}
                             {isAdminOrSuper && <SidebarItem icon={<IconWallet/>} label="الفواتير والمستحقات" active={activeTab === 'dues'} onClick={() => navigateTo('dues')} />}
@@ -610,12 +667,13 @@
                             {activeTab === 'dashboard' && !isDoctor && <DashboardStats data={filteredData} userRole={currentUser.role} onNav={navigateTo} />}
                                                         {activeTab === 'patients' && <PatientsView staff={data.staff} focusId={focus?.tab === 'patients' ? focus.id : null} patients={filteredData.patients} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'patient', mode:'add'})} onEdit={(d)=>setModal({type:'patient', mode:'edit', data:d})} showToast={setToastMsg} />}
                             {activeTab === 'appointments' && <AppointmentsView apps={filteredData.appointments} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'app', mode:'add'})} onEdit={(d)=>setModal({type:'app', mode:'edit', data:d})} onNav={navigateTo} showToast={setToastMsg} />}
+                            {activeTab === 'daily' && currentUser.role === 'employee' && <DailyView payments={data.payments} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'payment', mode:'add', data:{branchId:currentUser.branchId}})} onEdit={(d)=>setModal({type:'payment', mode:'edit', data:d})} showToast={setToastMsg} />}
                             {activeTab === 'finance' && isSuperAdmin && <FinanceView payments={filteredData.payments} branches={data.branches} selectedBranch={selectedBranch} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={(bId)=>setModal({type:'payment', mode:'add', data:{branchId:bId}})} onEdit={(d)=>setModal({type:'payment', mode:'edit', data:d})} showToast={setToastMsg} />}
                                                         {activeTab === 'labs' && <LabsView focusId={focus?.tab === 'labs' ? focus.id : null} cases={filteredData.labCases} costs={costs} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'lab', mode:'add'})} onEdit={(d)=>setModal({type:'lab', mode:'edit', data:d})} showToast={setToastMsg} />}
                             {activeTab === 'settings' && isAdminOrSuper && <SettingsView sections={[{ k: 'branches', label: 'الفروع', node: <BranchesView branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'branch', mode:'add'})} onEdit={(d)=>setModal({type:'branch', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'templates', label: 'قوالب الرسائل', node: <TemplatesView showToast={setToastMsg} /> }, ...(isSuperAdmin ? [{ k: 'staff', label: 'الموظفين', node: <StaffView staff={data.staff} branches={data.branches} onConfirm={setConfirmAction} onAdd={(k)=>setModal({type:'staff', mode:'add', data:{kind:k}})} onEdit={(d)=>setModal({type:'staff', mode:'edit', data:d})} showToast={setToastMsg} /> }] : [])]} />}
                             {activeTab === 'dues' && !isDoctor && <DuesView items={filteredData.dues} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'due', mode:'add'})} onEdit={(d)=>setModal({type:'due', mode:'edit', data:d})} showToast={setToastMsg} />}
                                                         {activeTab === 'consumables' && isAdminOrSuper && <ConsumablesView allItems={data.consumables} items={filteredData.consumables} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'consumable', mode:'add', data:{kind:'purchase'}})} onEdit={(d)=>setModal({type:'consumable', mode:'edit', data:d})} showToast={setToastMsg} />}
-                            {activeTab === 'shortages' && !isDoctor && <ShortagesView onBuy={(it)=> !isAdminOrSuper ? setConfirmAction({msg:'هل تم توفير وشراء هذا الصنف؟', onConfirm:()=>db.collection('shortages').doc(it.id).delete().then(()=>setToastMsg('تم')).catch(err=>setToastMsg('مشكلة: '+err.message))}) : setModal({type:'consumable', mode:'add', data:{itemName:it.itemName, qty:it.quantity, branchId:it.branchId, kind:'purchase', source:'auto', fromShortage:it.id}})} shortages={filteredData.shortages} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onEdit={(d)=>setModal({type:'shortage', mode:'edit', data:d})} showToast={setToastMsg} />}
+                            {activeTab === 'shortages' && !isDoctor && <ShortagesView onBuy={(it)=> !isAdminOrSuper ? setConfirmAction({msg:'هل تم توفير وشراء هذا الصنف؟', onConfirm:()=>db.collection('shortages').doc(it.id).delete().then(()=>setToastMsg('تم')).catch(err=>setToastMsg('مشكلة: '+err.message))}) : quickBuy(it)} shortages={filteredData.shortages} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onEdit={(d)=>setModal({type:'shortage', mode:'edit', data:d})} showToast={setToastMsg} />}
                         </div>
                     </div>
                 </div>
@@ -732,7 +790,7 @@
                 e.preventDefault();
                 if (!itemName || !quantity) return;
                 db.collection('shortages').add({ itemName, quantity, branchId, requestedBy: currentUser.name, timestamp: new Date().toISOString() })
-                .then(() => { setItemName(''); setQuantity(''); showToast("تم إضافة الصنف للمخزن"); })
+                .then(() => { const bn = branches.find(b => b.id === branchId)?.name || ''; tgSend(`⚠️ نقص جديد\nالصنف: ${itemName} (${quantity})\nالفرع: ${branchId === 'store' ? 'المخزن' : bn}\nبواسطة: ${currentUser.name}`, bn); setItemName(''); setQuantity(''); showToast("تم إضافة الصنف للمخزن"); })
                 .catch(err => showToast("مشكلة في إضافة صنف: " + err.message));
             };
 
@@ -792,12 +850,15 @@
                                                             </div>
                                                         </div>
                                                         
-                                                        <div className="flex items-center gap-1.5 w-full sm:w-auto">
+                                                        <div className="flex items-center gap-1.5 shrink-0">
                                                             <button type="button" onClick={() => onEdit(item)} className="bg-white text-gold-500 hover:bg-gold-500 hover:text-white p-1.5 rounded-lg border border-gray-200 transition-colors">
                                                                 <IconEdit />
                                                             </button>
-                                                            <button type="button" onClick={() => onBuy(item)} className="flex-1 sm:flex-none bg-emerald-50 text-emerald-600 hover:bg-emerald-500 hover:text-white px-3 py-1.5 rounded-lg font-bold text-[10px] border border-emerald-100 transition-colors text-center">
+                                                            <button type="button" onClick={() => onBuy(item)} className="bg-emerald-50 text-emerald-600 hover:bg-emerald-500 hover:text-white px-2 py-1 rounded-md font-bold text-[9px] border border-emerald-100 transition-colors whitespace-nowrap">
                                                                 ✅ تم الشراء
+                                                            </button>
+                                                            <button type="button" onClick={() => onConfirm({ msg: 'حذف "' + item.itemName + '" من النواقص؟', onConfirm: () => db.collection('shortages').doc(item.id).delete().then(() => showToast('تم الحذف')).catch(err => showToast('مشكلة في الحذف: ' + err.message)) })} className="p-1.5 text-red-500 bg-red-50 hover:bg-red-500 hover:text-white rounded-lg border border-red-100 transition-colors" title="حذف">
+                                                                <IconTrash />
                                                             </button>
                                                         </div>
                                                     </div>
@@ -1133,7 +1194,7 @@
                             <h4 className="font-black text-gray-800 text-sm">{d.party}</h4>
                             {d.desc && <p className="text-[11px] text-gray-500 font-bold">{d.desc}</p>}
                             <p className="text-lg font-black text-gold-600 mt-1">{Number(d.amount) || 0} ج</p>
-                            <p className={`text-[10px] font-black mt-1 ${late ? 'text-red-600' : 'text-gray-400'}`}>{d.paid ? '✓ سُدد ' + (d.paidAt || '') : 'موعد السداد: ' + (d.dueDate || '-') + (late ? ' (متأخر)' : '')}</p>
+                            <p className={`text-[10px] font-black mt-1 ${late ? 'text-red-600' : 'text-gray-400'}`}>{d.paid ? '✓ سُدد ' + (d.paidAt || '') : (d.dueDate ? 'موعد السداد: ' + d.dueDate + (late ? ' (متأخر)' : '') : 'بدون موعد سداد')}</p>
                             {isAdm && <button type="button" onClick={() => d.paid ? upd(d, { paid: false, paidAt: '' }, 'اتلغى السداد') : upd(d, { paid: true, paidAt: t }, 'تم تسجيل السداد')} className={`mt-2 px-3 py-1.5 rounded-lg text-[10px] font-bold ${d.paid ? 'bg-gray-100 text-gray-600' : 'bg-emerald-500 text-white'}`}>{d.paid ? 'إلغاء السداد' : 'تم السداد'}</button>}
                         </div>); }} />
                 </div>
@@ -1239,9 +1300,44 @@
                                         {p.paymentMethod && <span className="bg-gray-200 text-gray-600 text-[8px] px-1.5 py-0.5 rounded font-bold">{p.paymentMethod}</span>}
                                         <span className={`text-[8px] px-1.5 py-0.5 rounded font-bold ${!p.delivered ? 'bg-amber-100 text-amber-700' : p.zeroed ? 'bg-gray-200 text-gray-500' : 'bg-emerald-100 text-emerald-700'}`}>{!p.delivered ? 'في الخزنة' : p.zeroed ? 'تم التصفير' : 'تم التوريد'}</span>
                                     </div>
-                                    <p className="text-[9px] text-gray-500 font-bold">{p.date}</p>
+                                    <p className="text-[9px] text-gray-500 font-bold">{p.date}{p.recordedBy ? ' • ' + p.recordedBy : ''}</p>
                                 </div>
                                 <div className="text-emerald-500 font-black text-base mr-12">+{p.amount} ج</div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        }
+
+        // --- توريد اليوم (للسكرتارية): يشوفوا ويعدلوا اللي ضافوه النهاردة بس ---
+        function DailyView({ payments, branches, currentUser, onConfirm, onAdd, onEdit, showToast }) {
+            const [, tick] = useState(0);
+            useEffect(() => { const t = setInterval(() => tick(v => v + 1), 30000); return () => clearInterval(t); }, []);
+            const today = localDay();
+            const mine = payments.filter(p => p.createdDay === today && (p.recordedById ? p.recordedById === currentUser.id : p.recordedBy === currentUser.name)).sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+            const total = mine.reduce((s, p) => s + Number(p.amount || 0), 0);
+            const guard = (fn) => { if (localDay() !== today) { showToast('انتهى اليوم — مينفعش التعديل'); return; } fn(); };
+            return (
+                <div className="space-y-4 w-full animate-fade-in">
+                    <div className="bg-gradient-to-r from-gold-600 to-gold-400 p-6 rounded-[20px] text-white shadow-xl flex flex-wrap justify-between items-center gap-4">
+                        <div><p className="text-gold-100 text-[10px] font-bold mb-1">توريد اليوم ({mine.length} تسجيل)</p><h2 className="text-3xl font-black">{total} EGP</h2></div>
+                        <button type="button" onClick={onAdd} className="bg-white text-gold-600 px-5 py-2.5 rounded-xl text-xs font-black shadow-lg">+ إضافة توريد</button>
+                    </div>
+                    <div className="bg-white p-3 rounded-[20px] border border-gray-100 shadow-sm space-y-2">
+                        <p className="text-[10px] text-gray-400 font-bold px-1">بتشوفي هنا اللي ضفتيه النهاردة بس، وبيختفي تلقائياً بعد نهاية اليوم.</p>
+                        {mine.length === 0 && <p className="text-gray-400 text-xs font-bold text-center p-4">لا يوجد توريد مسجل اليوم.</p>}
+                        {mine.map(p => (
+                            <div key={p.id} className="flex justify-between items-center p-4 bg-gray-50 rounded-xl relative">
+                                <div className="absolute left-2 top-2 flex gap-1">
+                                    <button type="button" onClick={() => guard(() => onEdit(p))} className="p-1 text-gold-500 bg-white border border-gray-200 rounded-lg"><IconEdit/></button>
+                                    <button type="button" onClick={() => guard(() => onConfirm({ msg: 'حذف هذا التوريد؟', onConfirm: () => { if (localDay() !== today) { showToast('انتهى اليوم — مينفعش الحذف'); return; } db.collection('payments').doc(p.id).delete().then(() => showToast('تم الحذف')).catch(err => showToast('مشكلة في الحذف: ' + err.message)); } }))} className="p-1 text-red-500 bg-white border border-gray-200 rounded-lg"><IconTrash/></button>
+                                </div>
+                                <div className="mt-2">
+                                    <p className="font-black text-xs text-gray-800">فرع {branches.find(b => b.id === p.branchId)?.name || 'غير معروف'}</p>
+                                    {p.paymentMethod && <span className="bg-gray-200 text-gray-600 text-[8px] px-1.5 py-0.5 rounded font-bold">{p.paymentMethod}</span>}
+                                </div>
+                                <div className="text-emerald-500 font-black text-base mr-12">{p.amount} ج</div>
                             </div>
                         ))}
                     </div>
@@ -1529,7 +1625,10 @@
                     d.service = d.services.join('، ');
                     { const fd = +f.followUpDays.value; d.followUpDays = fd; if (fd !== (modal.data?.followUpDays || 0)) { d.followUpDate = fd ? addDays(fd) : ''; d.followedAt = ''; d.followRemind = false; } }
                 } else if(modal.type==='payment') {
-                    col='payments'; d={amount:f.amt.value, date:f.dt.value, branchId:f.bId.value, receivedBy:user.name, paymentMethod: f.payMethod.value}; if(modal.mode!=='edit') d.delivered=false;
+                    col='payments';
+                    if (user.role === 'employee' && modal.mode === 'edit' && modal.data?.createdDay !== localDay()) { showToast('انتهى اليوم — مينفعش التعديل'); onClose(); return; }
+                    d={amount:f.amt.value, date:f.dt ? f.dt.value : localDay(), branchId:user.role==='employee'?user.branchId:f.bId.value, receivedBy:user.name, paymentMethod: f.payMethod.value};
+                    if(modal.mode!=='edit') { d.delivered=false; d.recordedBy=user.name; d.recordedById=user.id || ''; d.createdDay=localDay(); d.createdAt=new Date().toISOString(); }
                 } else if(modal.type==='branch') {
                     col='branches'; d={name:f.name.value, phone:f.phone.value, address: f.address.value, mapsLink: f.mapsLink.value, reviewLink: f.reviewLink.value};
                 } else if(modal.type==='lab') {
@@ -1557,8 +1656,8 @@
                 } else {
                     db.collection(col).add(d)
                       .then(ref => { saveCost(ref.id);
-                          if (col === 'appointments' || col === 'shortages') { const bn = branches.find(b => b.id === d.branchId)?.name || ''; const dn = staff.find(x => x.id === d.doctorId)?.name;
-                              tgSend(col === 'appointments' ? `📅 حجز جديد\nالمريض: ${d.patientName}\nالموعد: ${d.date} ${d.time || ''}\nالخدمة: ${d.service || ''}${dn ? '\nالدكتور: ' + dn : ''}\nالفرع: ${bn}\nبواسطة: ${user.name}` : `⚠️ نقص جديد\nالصنف: ${d.itemName} (${d.quantity})\nالفرع: ${bn}\nبواسطة: ${user.name}`, bn); }
+                          if (col === 'appointments' || col === 'shortages' || col === 'dues') { const bn = branches.find(b => b.id === d.branchId)?.name || ''; const dn = staff.find(x => x.id === d.doctorId)?.name;
+                              tgSend(col === 'appointments' ? `📅 حجز جديد\nالمريض: ${d.patientName}\nالموعد: ${d.date} ${d.time || ''}\nالخدمة: ${d.service || ''}${dn ? '\nالدكتور: ' + dn : ''}\nالفرع: ${bn}\nبواسطة: ${user.name}` : col === 'dues' ? `🧾 فاتورة/مستحق جديد\nالجهة: ${d.party}\nالمبلغ: ${d.amount} ج${d.dueDate ? '\nموعد السداد: ' + d.dueDate : ''}\nالفرع: ${d.branchId === 'store' ? 'المخزن' : bn}\nبواسطة: ${user.name}` : `⚠️ نقص جديد\nالصنف: ${d.itemName} (${d.quantity})\nالفرع: ${bn}\nبواسطة: ${user.name}`, bn); }
                           if (modal.data?.fromShortage) db.collection('shortages').doc(modal.data.fromShortage).delete().catch(()=>{}); onClose(); showToast("تمت الإضافة بنجاح"); })
                       .catch(err => showToast("مشكلة في الإضافة! تفاصيل الخطأ: " + err.message));
                 }
@@ -1646,7 +1745,7 @@
                                 {modal.type==='payment' && (
                                     <>
                                         <Input name="amt" label="المبلغ" type="number" defaultValue={modal.data?.amount} required />
-                                        <Input name="dt" label="التاريخ" type="date" defaultValue={modal.data?.date || new Date().toISOString().split('T')[0]} required />
+                                        {user.role !== 'employee' && <Input name="dt" label="التاريخ" type="date" defaultValue={modal.data?.date || new Date().toISOString().split('T')[0]} required />}
                                         <Input name="payMethod" label="مكان الحفظ (اختياري)" defaultValue={modal.data?.paymentMethod} placeholder="كاش، فيزا..." />
                                         <div className="space-y-1">
                                             <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الفرع</label>
@@ -1691,7 +1790,7 @@
                                         <Input name="desc" label="البيان (رقم الفاتورة / الوصف)" defaultValue={modal.data?.desc} />
                                         <div className="grid grid-cols-2 gap-2">
                                             <Input name="amount" label="المبلغ (ج)" type="number" step="any" defaultValue={modal.data?.amount} required />
-                                            <Input name="dueDate" label="موعد السداد" type="date" defaultValue={modal.data?.dueDate} required />
+                                            <Input name="dueDate" label="موعد السداد (اختياري)" type="date" defaultValue={modal.data?.dueDate} />
                                         </div>
                                         {(user.role === 'admin' || user.role === 'superadmin') && <BranchSelect withStore branches={branches} defaultValue={modal.data?.branchId || (selectedBranch !== 'all' ? selectedBranch : 'store')} />}
                                     </>
