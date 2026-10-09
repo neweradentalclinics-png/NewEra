@@ -98,64 +98,86 @@
             await sa.signOut();
             return uid;
         };
-        const syncStaffAuth = async (staffId, d, prev) => {
+        // حفظ موظف + كوده + حساب دخوله في عملية واحدة.
+        // الكود نفسه بيتحفظ في staff_codes (السوبر أدمن بس يقدر يقراها) ومش بيتحفظ في staff_members.
+        const saveStaff = async (staffId, d, prev) => {
             const code = String(d.code || '').trim();
-            if (!code) throw new Error('الكود فاضي');
-            if (prev && prev.authUid && String(prev.code).trim() === code && prev.role === d.role && prev.name === d.name) return;
-            const uid = await ensureAuthUser(code);
+            if (!/^\d{4}$/.test(code)) throw new Error('الكود لازم يكون 4 أرقام');
+            const sameCode = prev && prev.authUid && String(prev.code || '').trim() === code;
+            const uid = sameCode ? prev.authUid : await ensureAuthUser(code);
             const ex = await db.collection('staff_auth').doc(uid).get();
             if (ex.exists && ex.data().staffId && ex.data().staffId !== staffId) throw new Error('الكود ده مستخدم لموظف تاني — غيّريه');
+            const { code: _c, ...rest } = d;
             const b = db.batch();
             if (prev && prev.authUid && prev.authUid !== uid) b.delete(db.collection('staff_auth').doc(prev.authUid));
+            b.set(db.collection('staff_members').doc(staffId), { ...rest, authUid: uid, code: firebase.firestore.FieldValue.delete() }, { merge: true });
+            b.set(db.collection('staff_codes').doc(staffId), { code });
             b.set(db.collection('staff_auth').doc(uid), { staffId, role: d.role, name: d.name });
-            b.update(db.collection('staff_members').doc(staffId), { authUid: uid });
             await b.commit();
         };
         const removeStaff = (st) => {
             const b = db.batch();
             if (st.authUid) b.delete(db.collection('staff_auth').doc(st.authUid));
             b.delete(db.collection('public_doctors').doc(st.id));
+            b.delete(db.collection('staff_codes').doc(st.id));
             b.delete(db.collection('staff_members').doc(st.id));
             return b.commit();
         };
+        // نقل الأكواد القديمة من staff_members لـ staff_codes (بيشتغل لوحده أول ما السوبر أدمن يدخل)
         const migrateAllStaff = async () => {
             const sn = await db.collection('staff_members').get(); let n = 0;
             for (const d of sn.docs) {
                 const st = d.data();
-                if (st.authUid || !st.code) continue;
-                try { await syncStaffAuth(d.id, st, st); n++; } catch (e) { console.error('migrate', e); }
+                if (st.code === undefined || st.code === null) continue;
+                try {
+                    if (String(st.code).trim()) await saveStaff(d.id, { ...st, code: String(st.code).trim() }, st.authUid ? { ...st, code: String(st.code).trim() } : null);
+                    else await d.ref.update({ code: firebase.firestore.FieldValue.delete() });
+                    n++;
+                } catch (e) { console.error('migrate', d.id, e); }
             }
             return n;
         };
-        // لموظف لسه معندوش حساب (قبل تفعيل القواعد الجديدة بس): بنجهزله حسابه أوتوماتيك أول ما يدخل
+        // بعد ما الحساب يدخل: نجيب بيانات الموظف من staff_auth (من غير ما ندوّر بالكود)
+        const loadStaffForUid = async (uid) => {
+            const sa = await db.collection('staff_auth').doc(uid).get();
+            if (!sa.exists || !sa.data().staffId) return null;
+            const m = await db.collection('staff_members').doc(sa.data().staffId).get();
+            if (!m.exists) return null;
+            const { code: _c, ...rest } = m.data();
+            return { id: m.id, ...rest, authUid: uid };
+        };
+        // للنظام القديم بس (قبل القواعد الجديدة): بتفشل بهدوء تحت القواعد الجديدة
         const legacyHeal = async (code) => {
             try {
                 await auth.signInAnonymously();
                 const sn = await db.collection('staff_members').where('code', '==', code).limit(1).get();
                 if (sn.empty) { await auth.signOut(); return false; }
                 const d = sn.docs[0];
-                await syncStaffAuth(d.id, d.data(), d.data());
+                await saveStaff(d.id, d.data(), null);
                 const { email, password } = await authCreds(code);
                 await auth.signInWithEmailAndPassword(email, password);
                 return true;
             } catch (e) { try { await auth.signOut(); } catch (x) {} return false; }
         };
+        // أول تشغيل على قاعدة بيانات جديدة فاضية بس (تحت القواعد الجديدة مش بيقدر يعمل حاجة — وده المطلوب)
         const bootstrapMaster = async () => {
-            const n = BOOTSTRAP_CODE;
-            await auth.signInAnonymously();
-            const sup = await db.collection('staff_members').where('role', '==', 'superadmin').limit(1).get();
-            if (!sup.empty) { alert('كود السوبر أدمن اتغيّر قبل كده. ادخلي بالكود الجديد.'); return false; }
-            const dup = await db.collection('staff_members').where('code', '==', n).limit(1).get();
-            if (!dup.empty) { alert('الكود 1279 مستخدم لموظف عادي. غيّري كوده الأول وجرّبي تاني.'); return false; }
-            const sd = { name: 'Admin', code: n, role: 'superadmin', branchId: 'all', branchIds: [], jobTitle: 'سوبر أدمن' };
-            const ref = await db.collection('staff_members').add(sd);
-            await syncStaffAuth(ref.id, sd, null);
-            return n;
+            try {
+                const n = BOOTSTRAP_CODE;
+                await auth.signInAnonymously();
+                const sup = await db.collection('staff_members').where('role', '==', 'superadmin').limit(1).get();
+                if (!sup.empty) return false;
+                const sd = { name: 'Admin', code: n, role: 'superadmin', branchId: 'all', branchIds: [], jobTitle: 'سوبر أدمن' };
+                const ref = db.collection('staff_members').doc();
+                await saveStaff(ref.id, sd, null);
+                return n;
+            } catch (e) { return false; }
         };
         // فروع الطبيب: القائمة الجديدة (branchIds) أو الفرع القديم (branchId)
         // ===== التنبيهات المجانية =====
-        // تيليجرام: ضعي توكن البوت (من @BotFather) وأرقام الشات (chat_id) هنا. المفتاح = اسم الفرع كما هو مكتوب في التطبيق.
-        const TG = { token: '8563202107:AAFaCbaavRp-CK6dihDPWSY9tpYX56QakIA', main: '8017153450', branches: { /* 'فيصل': 'CHAT_ID', 'حلوان': 'CHAT_ID' */ } };
+        // تيليجرام: التوكن وأرقام الشات بتتحط من الإعدادات (المفتاح في branches = اسم الفرع كما هو مكتوب في التطبيق).
+        // التوكن مش مكتوب في الكود خلاص: بيتحفظ في Firestore (private_config/telegram) ويتقري بعد دخول الموظف بس.
+        // السوبر أدمن يحطه من: الإعدادات → تيليجرام.
+        const TG = { token: '', main: '', branches: {} };
         const tgSend = (text, branchName) => {
             if (!TG.token) return;
             [...new Set([TG.main, TG.branches[branchName]].filter(Boolean))].forEach(chat =>
@@ -431,6 +453,8 @@
             
             const [data, setData] = useState({ branches: [], staff: [], patients: [], appointments: [], payments: [], shortages: [], labCases: [], consumables: [], dues: [] });
             const [costs, setCosts] = useState({});
+            const [staffCodes, setStaffCodes] = useState({});
+            const [authChecked, setAuthChecked] = useState(false);
             
             const [modal, setModal] = useState(null);
             const [confirmAction, setConfirmAction] = useState(null);
@@ -571,19 +595,23 @@
                     s => setData(d => ({...d, staff: s.docs.map(x => ({id: x.id, ...x.data()}))})),
                     err => console.error(err)
                 );
-                const unsub3 = db.collection('patients').onSnapshot(
+                // الطبيب بيقرا حالاته وحجوزاته هو بس (القواعد كمان بتمنعه من غير كده)
+                const isDocU = currentUser?.role === 'doctor';
+                const mineQ = col => isDocU ? db.collection(col).where('doctorId', '==', currentUser.id) : db.collection(col);
+                const none = () => () => {};
+                const unsub3 = mineQ('patients').onSnapshot(
                     s => setData(d => ({...d, patients: s.docs.map(x => ({id: x.id, ...x.data()}))})),
                     err => console.error(err)
                 );
-                const unsub4 = db.collection('appointments').onSnapshot(
+                const unsub4 = mineQ('appointments').onSnapshot(
                     s => { notify('appointments', s); setData(d => ({...d, appointments: s.docs.map(x => ({id: x.id, ...x.data()}))})); },
                     err => console.error(err)
                 );
-                const unsub5 = db.collection('payments').onSnapshot(
+                const unsub5 = isDocU ? none() : db.collection('payments').onSnapshot(
                     s => setData(d => ({...d, payments: s.docs.map(x => ({id: x.id, ...x.data()}))})),
                     err => console.error(err)
                 );
-                const unsub6 = db.collection('shortages').onSnapshot(
+                const unsub6 = isDocU ? none() : db.collection('shortages').onSnapshot(
                     s => { notify('shortages', s); setData(d => ({...d, shortages: s.docs.map(x => ({id: x.id, ...x.data()}))})); },
                     err => console.error(err)
                 );
@@ -592,21 +620,27 @@
                     s => setData(d => ({...d, labCases: s.docs.map(x => ({id: x.id, ...x.data()}))})),
                     err => console.error(err)
                 );
-                const unsub8 = db.collection('consumables').onSnapshot(
+                const unsub8 = isDocU ? none() : db.collection('consumables').onSnapshot(
                     s => setData(d => ({...d, consumables: s.docs.map(x => ({id: x.id, ...x.data()}))})),
                     err => console.error(err)
                 );
-                const unsub10 = db.collection('dues').onSnapshot(s => { notify('dues', s); setData(d => ({...d, dues: s.docs.map(x => ({id: x.id, ...x.data()}))})); }, err => console.error(err));
+                if (isDocU) { firstSnap.current.shortages = true; firstSnap.current.dues = true; }
+                const unsub10 = isDocU ? none() : db.collection('dues').onSnapshot(s => { notify('dues', s); setData(d => ({...d, dues: s.docs.map(x => ({id: x.id, ...x.data()}))})); }, err => console.error(err));
                 const unsub11 = db.collection('settings').doc('templates').onSnapshot(d => { if (d.exists) { const dd = { ...d.data() }; Object.keys(OLD_TG).forEach(k => { if (dd[k] === OLD_TG[k]) delete dd[k]; }); Object.assign(TPL, dd); setTplVer(v => v + 1); } }, err => console.error(err));
-                return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); unsub6(); unsub7(); unsub8(); unsub10(); unsub11(); };
+                const unsub12 = db.collection('private_config').doc('telegram').onSnapshot(d => { const x = d.exists ? d.data() : {}; TG.token = x.token || ''; TG.main = x.main || ''; TG.branches = x.branches || {}; }, err => console.error(err));
+                return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); unsub6(); unsub7(); unsub8(); unsub10(); unsub11(); unsub12(); };
             }, [isLoggedIn]);
 
-            // تكاليف المعامل: بتتحمل للسوبر أدمن فقط
+            // تكاليف المعامل + أكواد الموظفين: بتتحمل للسوبر أدمن فقط
             useEffect(() => {
                 if (currentUser?.role !== 'superadmin') return;
-                return db.collection('lab_costs').onSnapshot(s => {
+                const u1 = db.collection('lab_costs').onSnapshot(s => {
                     const m = {}; s.docs.forEach(x => m[x.id] = Number(x.data().amount || 0)); setCosts(m);
                 }, err => console.error(err));
+                const u2 = db.collection('staff_codes').onSnapshot(s => {
+                    const m = {}; s.docs.forEach(x => m[x.id] = x.data().code); setStaffCodes(m);
+                }, err => console.error(err));
+                return () => { u1(); u2(); };
             }, [currentUser]);
 
             // نسخة عامة (بدون بيانات شخصية) للأطباء والأوقات المحجوزة، عشان صفحة الحجز تقراها من غير ما تشوف بيانات المرضى
@@ -640,7 +674,7 @@
                         have.docs.forEach(x => { const at = x.data().at; if (!want[x.id] && !(at && Date.now() - at < 120000)) { b.delete(x.ref); n++; } });
                         if (n) await b.commit();
                         // حجوزات أونلاين قديمة (قبل التأمين): نربطها بكود الحجز عشان المريض يقدر يعدلها
-                        const legacy = data.appointments.filter(a => a.bookingCode && !a.source && a.date >= today).slice(0, 200);
+                        const legacy = data.appointments.filter(a => a.bookingCode && !a.source && a.date >= today && /^[A-Z0-9]{5,12}$/.test(a.bookingCode)).slice(0, 200);
                         if (legacy.length) {
                             const lb = db.batch();
                             legacy.forEach(a => { lb.update(db.collection('appointments').doc(a.id), { source: 'online' }); lb.set(db.collection('online_bookings').doc(a.bookingCode), { appointmentId: a.id }); });
@@ -661,40 +695,61 @@
                     setSelectedBranch(ids.length === 1 ? ids[0] : 'all');
                 }
             };
-            const loginByCode = async (code) => {
+            const afterLogin = (found) => {
+                finishLogin(found);
+                if (found.role === 'superadmin') migrateAllStaff().then(n => { if (n) setToastMsg('تم تأمين أكواد ' + n + ' موظف'); }).catch(() => {});
+            };
+            const loginByCode = async (code, remember) => {
                 const { email, password } = await authCreds(code);
+                // "تذكرني": الجلسة بتفضل محفوظة على الجهاز من غير ما نخزن الكود نفسه
+                try { await auth.setPersistence(remember === false ? firebase.auth.Auth.Persistence.SESSION : firebase.auth.Auth.Persistence.LOCAL); } catch (e) {}
                 let ok = false;
                 try { await auth.signInWithEmailAndPassword(email, password); ok = true; }
                 catch (e) {
                     if (e.code === 'auth/too-many-requests' || e.code === 'auth/network-request-failed' || e.code === 'auth/operation-not-allowed') throw e;
-                    ok = await legacyHeal(code);
+                    // الكود غلط (أو مالوش حساب) — legacyHeal مش بيشتغل تحت القواعد الجديدة فمش بنستخدمه
                 }
-                if (!ok) return false;
-                const sn = await db.collection('staff_members').where('code', '==', code).limit(1).get();
-                if (sn.empty) { await auth.signOut().catch(() => {}); return false; }
-                const found = { id: sn.docs[0].id, ...sn.docs[0].data() };
-                finishLogin(found);
-                if (found.role === 'superadmin') migrateAllStaff().then(n => { if (n) setToastMsg('تم تجهيز ' + n + ' موظف للدخول الآمن'); }).catch(() => {});
+                if (!ok || !auth.currentUser) return false;
+                const found = await loadStaffForUid(auth.currentUser.uid);
+                if (!found) { await auth.signOut().catch(() => {}); return false; }
+                afterLogin({ ...found, code });
                 return true;
             };
-            const doLogin = async (rawCode) => {
+            const doLogin = async (rawCode, remember) => {
                 const code = String(rawCode || '').trim();
                 if (!code) return false;
                 try {
+                    if (await loginByCode(code, remember)) return code;
                     if (code === BOOTSTRAP_CODE) {
-                        // لو حساب السوبر أدمن موجود بيدخل عادي، وإلا بنجهّزه أول مرة بس
-                        if (await loginByCode(code)) return code;
+                        // أول تشغيل على قاعدة بيانات فاضية بس
                         const created = await bootstrapMaster();
-                        if (!created) { await auth.signOut().catch(() => {}); return false; }
-                        return (await loginByCode(code)) ? code : false;
+                        if (created) return (await loginByCode(code, remember)) ? code : false;
                     }
-                    return (await loginByCode(code)) ? code : false;
+                    return false;
                 } catch (e) {
                     console.error(e);
-                    alert('مشكلة في الدخول: ' + (e.message || e) + (e.code === 'auth/operation-not-allowed' ? '\n(فعّلي Email/Password من Firebase → Authentication → Sign-in method)' : '') + (String(e.code).includes('permission') ? '\n(لو نشرتي القواعد الجديدة قبل أول دخول، ارجعي للقواعد القديمة مؤقتاً، ادخلي مرة، وبعدها انشري الجديدة)' : ''));
+                    alert(e.code === 'auth/too-many-requests' ? 'محاولات كتير غلط — استني شوية وجرّبي تاني.'
+                        : e.code === 'auth/network-request-failed' ? 'مفيش إنترنت — اتأكدي من الاتصال.'
+                        : 'مشكلة في الدخول: ' + (e.message || e) + (e.code === 'auth/operation-not-allowed' ? '\n(فعّلي Email/Password من Firebase → Authentication → Sign-in method)' : ''));
                     return false;
                 }
             };
+            // دخول تلقائي: لو الجهاز عليه جلسة موظف محفوظة، بيدخل على طول من غير كود
+            useEffect(() => {
+                const un = auth.onAuthStateChanged(async (u) => {
+                    un();
+                    try {
+                        if (u && !u.isAnonymous && u.providerData.some(p => p.providerId === 'password')) {
+                            const found = await loadStaffForUid(u.uid);
+                            if (found) { afterLogin(found); return; }
+                        }
+                        // أجهزة كانت حافظة الكود نفسه (النسخة القديمة): ندخل بيه مرة ونمسحه
+                        const old = localStorage.getItem('newEraSavedCode');
+                        if (old) { localStorage.removeItem('newEraSavedCode'); await doLogin(old, true); }
+                    } catch (e) { console.error(e); }
+                    finally { setAuthChecked(true); }
+                });
+            }, []);
 
             const filteredData = useMemo(() => {
                 const isDocUser = currentUser?.role === 'doctor';
@@ -715,7 +770,8 @@
                 };
             }, [data, currentUser, selectedBranch]);
 
-            if (!isLoggedIn) return <LoginView onLogin={doLogin} />;
+            if (!isLoggedIn) return authChecked ? <LoginView onLogin={doLogin} /> : <div className="h-screen bg-[#050505] flex items-center justify-center text-gold-500 font-black">...</div>;
+            const staffFull = data.staff.map(s => staffCodes[s.id] !== undefined ? { ...s, code: staffCodes[s.id] } : s);
 
             const isSuperAdmin = currentUser.role === 'superadmin';
             const isAdminOrSuper = currentUser.role === 'admin' || currentUser.role === 'superadmin';
@@ -757,7 +813,7 @@
                     {alerts.length > 0 && <div className="fixed top-3 left-3 right-3 z-[999999] flex flex-col gap-2 max-w-md mx-auto">{alerts.slice(-1).map(a => <button key={a.id} type="button" onClick={() => { pickNotif(a); setAlerts([]); }} className="bg-gray-900 text-white text-xs font-bold p-3 rounded-2xl shadow-2xl text-right animate-slide-up">{a.text}</button>)}</div>}
                     {toastMsg && <Toast msg={toastMsg} onClose={() => setToastMsg(null)} />}
                     {confirmAction && <ConfirmModal action={confirmAction} onClose={()=>setConfirmAction(null)} />}
-                    {modal && <DataModal modal={modal} staff={data.staff} costs={costs} labNames={[...new Set(filteredData.labCases.map(c => c.labName).filter(Boolean))]} lastCosts={Object.fromEntries(data.consumables.filter(c => c.unitCost).sort((a, b) => (a.date || '').localeCompare(b.date || '')).map(c => [(c.itemName || '').trim().toLowerCase(), c.unitCost]))} labPhones={Object.fromEntries(filteredData.labCases.filter(c => c.labPhone).map(c => [c.labName, c.labPhone]))} branches={data.branches} user={currentUser} selectedBranch={selectedBranch} onClose={()=>setModal(null)} showToast={setToastMsg} />}
+                    {modal && <DataModal modal={modal} staff={staffFull} costs={costs} labNames={[...new Set(filteredData.labCases.map(c => c.labName).filter(Boolean))]} lastCosts={Object.fromEntries(data.consumables.filter(c => c.unitCost).sort((a, b) => (a.date || '').localeCompare(b.date || '')).map(c => [(c.itemName || '').trim().toLowerCase(), c.unitCost]))} labPhones={Object.fromEntries(filteredData.labCases.filter(c => c.labPhone).map(c => [c.labName, c.labPhone]))} branches={data.branches} user={currentUser} selectedBranch={selectedBranch} onClose={()=>setModal(null)} showToast={setToastMsg} />}
 
                     {/* Overlay للطبقة الشفافة عشان تقفل القايمة الجانبية لما تدوس بره */}
                     {isSidebarOpen && (
@@ -827,7 +883,7 @@
                                     <p className="text-xs font-black text-gray-800">{currentUser.name}</p>
                                     <p className="text-[10px] text-gold-500 font-bold uppercase">{isSuperAdmin ? 'Super Admin' : currentUser.role === 'admin' ? 'مدير عام' : currentUser.role === 'doctor' ? 'طبيب' : 'موظف فرع'}</p>
                                 </div>
-                                <button type="button" onClick={() => {localStorage.removeItem('newEraSavedCode'); auth.signOut().catch(() => {}).finally(() => window.location.reload());}} className="text-red-500 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-xl font-bold text-xs transition-colors">خروج</button>
+                                <button type="button" onClick={() => {try { localStorage.removeItem('newEraSavedCode'); } catch (e) {} auth.signOut().catch(() => {}).finally(() => window.location.reload());}} className="text-red-500 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-xl font-bold text-xs transition-colors">خروج</button>
                             </div>
                         </header>
 
@@ -838,7 +894,7 @@
                             {activeTab === 'daily' && currentUser.role === 'employee' && <DailyView payments={data.payments} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'payment', mode:'add', data:{branchId:currentUser.branchId}})} onEdit={(d)=>setModal({type:'payment', mode:'edit', data:d})} showToast={setToastMsg} />}
                             {activeTab === 'finance' && isSuperAdmin && <FinanceView payments={filteredData.payments} branches={data.branches} selectedBranch={selectedBranch} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={(bId)=>setModal({type:'payment', mode:'add', data:{branchId:bId}})} onEdit={(d)=>setModal({type:'payment', mode:'edit', data:d})} showToast={setToastMsg} />}
                                                         {activeTab === 'labs' && <LabsView focusId={focus?.tab === 'labs' ? focus.id : null} cases={filteredData.labCases} costs={costs} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'lab', mode:'add'})} onEdit={(d)=>setModal({type:'lab', mode:'edit', data:d})} showToast={setToastMsg} />}
-                            {activeTab === 'settings' && isAdminOrSuper && <SettingsView sections={[{ k: 'branches', label: 'الفروع', node: <BranchesView branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'branch', mode:'add'})} onEdit={(d)=>setModal({type:'branch', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'templates', label: 'قوالب الرسائل', node: <TemplatesView showToast={setToastMsg} /> }, ...(isSuperAdmin ? [{ k: 'staff', label: 'الموظفين', node: <StaffView staff={data.staff} branches={data.branches} onConfirm={setConfirmAction} onAdd={(k)=>setModal({type:'staff', mode:'add', data:{kind:k}})} onEdit={(d)=>setModal({type:'staff', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'mycode', label: 'كود السوبر أدمن', node: <MasterCodeView currentUser={currentUser} showToast={setToastMsg} /> }] : [])]} />}
+                            {activeTab === 'settings' && isAdminOrSuper && <SettingsView sections={[{ k: 'branches', label: 'الفروع', node: <BranchesView branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'branch', mode:'add'})} onEdit={(d)=>setModal({type:'branch', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'templates', label: 'قوالب الرسائل', node: <TemplatesView showToast={setToastMsg} /> }, ...(isSuperAdmin ? [{ k: 'staff', label: 'الموظفين', node: <StaffView staff={staffFull} branches={data.branches} onConfirm={setConfirmAction} onAdd={(k)=>setModal({type:'staff', mode:'add', data:{kind:k}})} onEdit={(d)=>setModal({type:'staff', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'mycode', label: 'كود السوبر أدمن', node: <MasterCodeView currentUser={currentUser} showToast={setToastMsg} /> }, { k: 'telegram', label: 'تيليجرام', node: <TelegramView showToast={setToastMsg} /> }] : [])]} />}
                             {activeTab === 'dues' && !isDoctor && <DuesView focusIds={focus?.tab === 'dues' ? focus.ids : null} items={filteredData.dues} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'due', mode:'add'})} onEdit={(d)=>setModal({type:'due', mode:'edit', data:d})} showToast={setToastMsg} />}
                                                         {activeTab === 'consumables' && isAdminOrSuper && <ConsumablesView allItems={data.consumables} items={filteredData.consumables} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'consumable', mode:'add', data:{kind:'purchase'}})} onEdit={(d)=>setModal({type:'consumable', mode:'edit', data:d})} showToast={setToastMsg} />}
                             {activeTab === 'shortages' && !isDoctor && <ShortagesView focusIds={focus?.tab === 'shortages' ? focus.ids : null} onBuy={(it)=> !isAdminOrSuper ? setConfirmAction({msg:'هل تم توفير وشراء هذا الصنف؟', onConfirm:()=>db.collection('shortages').doc(it.id).delete().then(()=>setToastMsg('تم')).catch(err=>setToastMsg('مشكلة: '+err.message))}) : quickBuy(it)} shortages={filteredData.shortages} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onEdit={(d)=>setModal({type:'shortage', mode:'edit', data:d})} showToast={setToastMsg} />}
@@ -854,10 +910,6 @@
             const inputRefs = useRef([]);
 
             const [busy, setBusy] = useState(false);
-            useEffect(() => {
-                const savedCode = localStorage.getItem('newEraSavedCode');
-                if (savedCode) Promise.resolve(onLogin(savedCode)).then(r => { if (typeof r === 'string' && r !== savedCode) localStorage.setItem('newEraSavedCode', r); }).catch(() => {});
-            }, []);
 
             const handleChange = (index, value) => {
                 if (!/^[0-9]*$/.test(value)) return;
@@ -874,11 +926,9 @@
                 if (busy) return;
                 const fullCode = code.join('');
                 setBusy(true);
-                const success = await onLogin(fullCode);
+                const success = await onLogin(fullCode, rememberMe);
                 setBusy(false);
-                if (success && rememberMe) {
-                    localStorage.setItem('newEraSavedCode', typeof success === 'string' ? success : fullCode);
-                } else if (!success) {
+                if (!success) {
                     alert("كود الدخول غير صحيح!");
                     setCode(['', '', '', '']);
                     inputRefs.current[0].focus();
@@ -1345,21 +1395,17 @@
                 e.preventDefault();
                 if (busy) return;
                 const o = oldC.trim(), n = newC.trim();
-                if (o !== String(currentUser.code)) { showToast('الكود الحالي غلط'); return; }
                 if (!/^\d{4}$/.test(n)) { showToast('الكود الجديد لازم يكون 4 أرقام'); return; }
                 if (n !== conf.trim()) { showToast('تأكيد الكود مش مطابق'); return; }
                 if (n === o) { showToast('الكود الجديد هو نفسه القديم'); return; }
                 setBusy(true);
                 try {
-                    const dup = await db.collection('staff_members').where('code', '==', n).limit(1).get();
-                    if (!dup.empty) { showToast('الكود ده مستخدم لموظف تاني'); setBusy(false); return; }
-                    const uid = await ensureAuthUser(n);
-                    const b = db.batch();
-                    if (currentUser.authUid && currentUser.authUid !== uid) b.delete(db.collection('staff_auth').doc(currentUser.authUid));
-                    b.set(db.collection('staff_auth').doc(uid), { staffId: currentUser.id, role: 'superadmin', name: currentUser.name });
-                    b.update(db.collection('staff_members').doc(currentUser.id), { code: n, authUid: uid });
-                    await b.commit();
-                    try { if (localStorage.getItem('newEraSavedCode')) localStorage.setItem('newEraSavedCode', n); } catch (x) {}
+                    // التأكد من الكود الحالي من غير ما نخزنه في أي مكان
+                    let okOld = false;
+                    try { const c = await authCreds(o); const sa = getSecAuth(); const r = await sa.signInWithEmailAndPassword(c.email, c.password); okOld = r.user.uid === currentUser.authUid; await sa.signOut(); } catch (x) {}
+                    if (!okOld) { showToast('الكود الحالي غلط'); setBusy(false); return; }
+                    const { name, role, branchId, branchIds, jobTitle } = currentUser;
+                    await saveStaff(currentUser.id, { name, role, branchId: branchId || 'all', branchIds: branchIds || [], jobTitle: jobTitle || 'سوبر أدمن', code: n }, { ...currentUser, code: o });
                     alert('تم تغيير الكود. هتدخلي بالكود الجديد من الشاشة الجاية.');
                     auth.signOut().catch(() => {}).finally(() => window.location.reload());
                 } catch (err) {
@@ -1379,6 +1425,36 @@
                         <input type="password" inputMode="numeric" maxLength={4} value={conf} onChange={e => setConf(e.target.value.replace(/\D/g, ''))} className={inp} required /></div>
                     <button disabled={busy} type="submit" className="w-full bg-gold-500 text-white py-3 rounded-xl font-black text-sm shadow-md hover:bg-gold-600 disabled:opacity-50">{busy ? 'جاري الحفظ...' : 'حفظ الكود الجديد'}</button>
                 </form>
+            );
+        }
+
+        // إعدادات تيليجرام (السوبر أدمن بس) — بتتحفظ في مكان مقفول على الموظفين
+        function TelegramView({ showToast }) {
+            const [v, setV] = useState(null);
+            useEffect(() => { db.collection('private_config').doc('telegram').get().then(d => {
+                const x = d.exists ? d.data() : {};
+                setV({ token: x.token || '', main: x.main || '', branches: Object.entries(x.branches || {}).map(([k, c]) => k + '=' + c).join('\n') });
+            }).catch(e => showToast(e.message)); }, []);
+            if (!v) return <p className="text-xs font-bold text-gray-400">...</p>;
+            const inp = "w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500";
+            const save = () => {
+                const branches = {};
+                v.branches.split('\n').forEach(l => { const i = l.indexOf('='); if (i > 0) branches[l.slice(0, i).trim()] = l.slice(i + 1).trim(); });
+                db.collection('private_config').doc('telegram').set({ token: v.token.trim(), main: v.main.trim(), branches })
+                    .then(() => showToast('تم حفظ إعدادات تيليجرام')).catch(e => showToast(e.message));
+            };
+            return (
+                <div className="bg-white rounded-[20px] border border-gray-100 shadow-sm p-5 space-y-3 max-w-md">
+                    <h4 className="font-black text-gray-800 text-sm">إعدادات تيليجرام</h4>
+                    <p className="text-[10px] text-gray-400 font-bold">التوكن بيتحفظ هنا بدل ما يكون مكتوب في كود الصفحة، فمحدش يشوفه غير الموظفين بعد الدخول.</p>
+                    <div className="space-y-1"><label className="text-[9px] font-black text-gray-500 block">توكن البوت (من @BotFather)</label>
+                        <input dir="ltr" type="password" value={v.token} onChange={e => setV({ ...v, token: e.target.value })} className={inp} /></div>
+                    <div className="space-y-1"><label className="text-[9px] font-black text-gray-500 block">رقم الشات الرئيسي (chat_id)</label>
+                        <input dir="ltr" value={v.main} onChange={e => setV({ ...v, main: e.target.value })} className={inp} /></div>
+                    <div className="space-y-1"><label className="text-[9px] font-black text-gray-500 block">شات لكل فرع (اختياري) — سطر لكل فرع: اسم الفرع=chat_id</label>
+                        <textarea rows="3" value={v.branches} onChange={e => setV({ ...v, branches: e.target.value })} className={inp} /></div>
+                    <button type="button" onClick={save} className="w-full bg-gold-500 text-white py-3 rounded-xl font-black text-sm">حفظ</button>
+                </div>
             );
         }
 
@@ -1872,13 +1948,23 @@
                     if(modal.mode !== 'edit') { d.requestedBy = user.name; d.timestamp = new Date().toISOString(); }
                 }
 
+                if (col === 'staff_members') {
+                    // الموظف + الكود + حساب الدخول بيتحفظوا مع بعض (لو الكود مكرر مفيش حاجة بتتحفظ)
+                    const sid = modal.mode === 'edit' ? modal.data.id : db.collection('staff_members').doc().id;
+                    showToast('جاري الحفظ...');
+                    saveStaff(sid, d, modal.mode === 'edit' ? modal.data : null)
+                        .then(() => { onClose(); showToast(modal.mode === 'edit' ? 'تم التعديل بنجاح' : 'تمت الإضافة بنجاح'); })
+                        .catch(err => showToast('مشكلة في الحفظ: ' + err.message));
+                    return;
+                }
+
                 if(modal.mode==='edit') {
                     db.collection(col).doc(modal.data.id).update(d)
-                      .then(() => { saveCost(modal.data.id); if (col === 'staff_members') syncStaffAuth(modal.data.id, d, modal.data).catch(err => showToast("اتحفظ، بس مشكلة في تأمين الدخول: " + err.message)); onClose(); showToast("تم التعديل بنجاح"); })
+                      .then(() => { saveCost(modal.data.id); onClose(); showToast("تم التعديل بنجاح"); })
                       .catch(err => showToast("مشكلة في التعديل! تفاصيل الخطأ: " + err.message));
                 } else {
                     db.collection(col).add(d)
-                      .then(ref => { saveCost(ref.id); if (col === 'staff_members') syncStaffAuth(ref.id, d, null).catch(err => showToast("اتحفظ، بس مشكلة في تأمين الدخول: " + err.message));
+                      .then(ref => { saveCost(ref.id);
                           if (col === 'appointments' || col === 'shortages' || col === 'dues') { const bn = branches.find(b => b.id === d.branchId)?.name || ''; const dn = staff.find(x => x.id === d.doctorId)?.name;
                               tgSend(tgText(col, d, bn, dn, user.name, ref.id), bn); }
                           if (modal.data?.fromShortage) db.collection('shortages').doc(modal.data.fromShortage).delete().catch(()=>{}); onClose(); showToast("تمت الإضافة بنجاح"); })
