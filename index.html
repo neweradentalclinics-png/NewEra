@@ -142,14 +142,14 @@
         };
         const bootstrapMaster = async () => {
             const n = BOOTSTRAP_CODE;
+            await auth.signInAnonymously();
+            const sup = await db.collection('staff_members').where('role', '==', 'superadmin').limit(1).get();
+            if (!sup.empty) { alert('كود السوبر أدمن اتغيّر قبل كده. ادخلي بالكود الجديد.'); return false; }
             const dup = await db.collection('staff_members').where('code', '==', n).limit(1).get();
+            if (!dup.empty) { alert('الكود 1279 مستخدم لموظف عادي. غيّري كوده الأول وجرّبي تاني.'); return false; }
             const sd = { name: 'Admin', code: n, role: 'superadmin', branchId: 'all', branchIds: [], jobTitle: 'سوبر أدمن' };
-            let sid;
-            if (!dup.empty && dup.docs[0].data().role === 'superadmin') sid = dup.docs[0].id;
-            else if (!dup.empty) { alert('الكود 1279 مستخدم لموظف عادي. غيّري كوده الأول من النسخة القديمة وجرّبي تاني.'); return false; }
-            else sid = (await db.collection('staff_members').add(sd)).id;
-            await syncStaffAuth(sid, sd, null);
-            await db.collection('settings').doc('security').set({ masterReady: true, at: new Date().toISOString() });
+            const ref = await db.collection('staff_members').add(sd);
+            await syncStaffAuth(ref.id, sd, null);
             return n;
         };
         // فروع الطبيب: القائمة الجديدة (branchIds) أو الفرع القديم (branchId)
@@ -682,19 +682,16 @@
                 if (!code) return false;
                 try {
                     if (code === BOOTSTRAP_CODE) {
-                        let fresh = false;
-                        try { await auth.signInAnonymously(); const sc = await db.collection('settings').doc('security').get(); fresh = !(sc.exists && sc.data().masterReady); } catch (e) { fresh = false; }
-                        if (fresh) {
-                            const nc = await bootstrapMaster();
-                            if (!nc) { await auth.signOut().catch(() => {}); return false; }
-                            return (await loginByCode(nc)) ? nc : false;
-                        }
-                        await auth.signOut().catch(() => {});
+                        // لو حساب السوبر أدمن موجود بيدخل عادي، وإلا بنجهّزه أول مرة بس
+                        if (await loginByCode(code)) return code;
+                        const created = await bootstrapMaster();
+                        if (!created) { await auth.signOut().catch(() => {}); return false; }
+                        return (await loginByCode(code)) ? code : false;
                     }
                     return (await loginByCode(code)) ? code : false;
                 } catch (e) {
                     console.error(e);
-                    alert('مشكلة في الدخول: ' + (e.message || e) + (e.code === 'auth/operation-not-allowed' ? '\n(فعّلي Email/Password من Firebase → Authentication → Sign-in method)' : ''));
+                    alert('مشكلة في الدخول: ' + (e.message || e) + (e.code === 'auth/operation-not-allowed' ? '\n(فعّلي Email/Password من Firebase → Authentication → Sign-in method)' : '') + (String(e.code).includes('permission') ? '\n(لو نشرتي القواعد الجديدة قبل أول دخول، ارجعي للقواعد القديمة مؤقتاً، ادخلي مرة، وبعدها انشري الجديدة)' : ''));
                     return false;
                 }
             };
