@@ -1692,6 +1692,20 @@
         function TelegramView({ showToast, branches = [] }) {
             const [v, setV] = useState(null);
             const [found, setFound] = useState(null);
+            const [bot, setBot] = useState(null);
+            const [showTk, setShowTk] = useState(false);
+            const [testRes, setTestRes] = useState({});
+            const why = (d) => /chat not found/i.test(d) ? 'الرقم ده لسه مكلّمش البوت: صاحب الرقم لازم يفتح البوت ويدوس Start (أو الرقم غلط)'
+                : /unauthorized/i.test(d) ? 'التوكن غلط أو اتلغى — راجعيه من @BotFather'
+                : /blocked/i.test(d) ? 'صاحب الرقم عامل Block للبوت — يفتحه ويدوس Restart'
+                : /kicked|not a member/i.test(d) ? 'البوت اتشال من الجروب ده — ضيفيه تاني'
+                : /failed to fetch|network/i.test(d) ? 'الجهاز مش قادر يوصل لتيليجرام (النت أو الشبكة حاجباه)' : d;
+            // اسم البوت ولينكه (عشان السكرتارية تعرف تبعت لمين)
+            useEffect(() => {
+                const tk = v && v.token.trim(); if (!tk) { setBot(null); return; }
+                const t = setTimeout(() => fetch(`https://api.telegram.org/bot${tk}/getMe`).then(r => r.json()).then(j => setBot(j.ok ? j.result : { err: j.description || 'التوكن غلط' })).catch(() => setBot({ err: 'مش قادرين نوصل لتيليجرام' })), 500);
+                return () => clearTimeout(t);
+            }, [v && v.token]);
             useEffect(() => { db.collection('private_config').doc('telegram').get().then(d => {
                 const x = d.exists ? d.data() : {}, bx = x.branches || {};
                 setV({ token: x.token || '', main: x.main || '', branches: Object.fromEntries(branches.map(b => [b.id, bx[b.id] || bx[b.name] || ''])), routes: mergeRoutes(x) });
@@ -1704,17 +1718,23 @@
                 db.collection('private_config').doc('telegram').set({ token: v.token.trim(), main: v.main.trim(), branches: br, routes: v.routes, routesKnown: TG_KINDS.map(k => k[0]) })
                     .then(() => showToast('تم حفظ إعدادات تيليجرام')).catch(e => showToast(e.message));
             };
-            const test = (chat, label) => {
-                if (!v.token.trim() || !String(chat).trim()) { showToast('حطي التوكن ورقم الشات الأول'); return; }
-                fetch(`https://api.telegram.org/bot${v.token.trim()}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: String(chat).trim(), text: '✅ رسالة تجربة من سيستم نيو إيرا — ' + label }) })
-                    .then(r => r.json()).then(j => showToast(j.ok ? 'الرسالة وصلت ✓' : 'موصلتش: ' + (j.description || ''))).catch(e => showToast(e.message));
+            const test = (chat, label, key) => {
+                const tk = v.token.trim(), id = String(chat || '').trim();
+                if (!tk) { setTestRes(r => ({ ...r, [key]: { ok: false, t: 'خانة التوكن فاضية — حطيه واحفظي' } })); return; }
+                if (!id) { setTestRes(r => ({ ...r, [key]: { ok: false, t: 'رقم الشات فاضي' } })); return; }
+                setTestRes(r => ({ ...r, [key]: { t: 'جاري الإرسال...' } }));
+                fetch(`https://api.telegram.org/bot${tk}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: id, text: '✅ رسالة تجربة من سيستم نيو إيرا — ' + label }) })
+                    .then(r => r.json()).then(j => setTestRes(r => ({ ...r, [key]: j.ok ? { ok: true, t: 'الرسالة وصلت ✓' } : { ok: false, t: why(j.description || '') } })))
+                    .catch(e => setTestRes(r => ({ ...r, [key]: { ok: false, t: why(e.message) } })));
             };
+            const Res = ({ k }) => testRes[k] ? <p className={`text-[11px] font-bold ${testRes[k].ok ? 'text-emerald-600' : testRes[k].ok === false ? 'text-red-600' : 'text-gray-400'}`}>{testRes[k].t}</p> : null;
             const findChats = () => {
                 if (!v.token.trim()) { showToast('حطي التوكن الأول'); return; }
                 fetch(`https://api.telegram.org/bot${v.token.trim()}/getUpdates`).then(r => r.json()).then(j => {
-                    const m = {}; (j.result || []).forEach(u => { const c = (u.message || u.my_chat_member || u.channel_post || {}).chat; if (c) m[c.id] = c.title || [c.first_name, c.last_name].filter(Boolean).join(' ') || c.username || c.id; });
+                    if (!j.ok) { setFound({ err: j.description || 'خطأ من تيليجرام' }); return; }
+                    const m = {}; (j.result || []).forEach(u => { const c = (u.message || u.edited_message || u.my_chat_member || u.chat_member || u.channel_post || {}).chat; if (c) m[c.id] = (c.type === 'private' ? '👤 ' : '👥 ') + (c.title || [c.first_name, c.last_name].filter(Boolean).join(' ') || c.username || c.id); });
                     setFound(Object.entries(m));
-                }).catch(e => showToast(e.message));
+                }).catch(e => setFound({ err: e.message }));
             };
             const togg = (side, k) => setV(p => { const cur = p.routes[side] || []; return { ...p, routes: { ...p.routes, [side]: cur.includes(k) ? cur.filter(x => x !== k) : [...cur, k] } }; });
             return (
@@ -1722,17 +1742,26 @@
                     <div className={card}>
                         <h4 className="font-black text-gray-800 text-sm">البوت</h4>
                         <div className="space-y-1"><label className="text-[9px] font-black text-gray-500 block">توكن البوت (من @BotFather)</label>
-                            <input dir="ltr" type="password" value={v.token} onChange={e => setV({ ...v, token: e.target.value })} className={inp} /></div>
+                            <div className="flex gap-2"><input dir="ltr" type={showTk ? 'text' : 'password'} value={v.token} onChange={e => setV({ ...v, token: e.target.value })} className={inp} /><button type="button" onClick={() => setShowTk(!showTk)} className="px-3 bg-gray-100 rounded-xl text-[10px] font-black shrink-0">{showTk ? 'إخفاء' : 'إظهار'}</button></div></div>
+                        {bot && (bot.err ? <p className="text-[11px] font-bold text-red-600">⚠️ {bot.err}</p> :
+                            <div className="flex items-center justify-between gap-2 bg-blue-50 rounded-xl p-3"><div className="min-w-0"><p className="text-[11px] font-black text-gray-800 truncate">🤖 {bot.first_name}</p><p className="text-[11px] font-bold text-blue-700" dir="ltr">@{bot.username}</p></div>
+                                <a href={'https://t.me/' + bot.username} target="_blank" rel="noreferrer" className="shrink-0 bg-blue-600 text-white text-[11px] font-black px-3 py-2 rounded-lg">افتح البوت</a></div>)}
                         <div className="space-y-1"><label className="text-[9px] font-black text-gray-500 block">شات الإدارة (الرئيسي)</label>
-                            <div className="flex gap-2"><input dir="ltr" value={v.main} onChange={e => setV({ ...v, main: e.target.value })} className={inp} /><button type="button" onClick={() => test(v.main, 'الإدارة')} className="px-3 bg-gray-100 rounded-xl text-[10px] font-black shrink-0">تجربة</button></div></div>
+                            <div className="flex gap-2"><input dir="ltr" value={v.main} onChange={e => setV({ ...v, main: e.target.value })} className={inp} /><button type="button" onClick={() => test(v.main, 'الإدارة', 'main')} className="px-3 bg-gray-100 rounded-xl text-[10px] font-black shrink-0">تجربة</button></div><Res k="main" /></div>
                     </div>
                     <div className={card}>
                         <h4 className="font-black text-gray-800 text-sm">شات سكرتارية كل فرع</h4>
                         <p className="text-[10px] text-gray-400 font-bold leading-relaxed">إزاي تجيبي رقم الشات: السكرتيرة تفتح البوت على تيليجرام من موبايلها وتدوس <b>Start</b> وتبعتله أي رسالة (أو ضيفي البوت في جروب الفرع وابعتي فيه رسالة)، وبعدها دوسي "هات الشاتات" تحت واختاري الرقم.</p>
                         {branches.map(b => <div key={b.id} className="space-y-1"><label className="text-[9px] font-black text-gray-500 block">فرع {b.name}</label>
-                            <div className="flex gap-2"><input dir="ltr" value={v.branches[b.id] || ''} onChange={e => setV({ ...v, branches: { ...v.branches, [b.id]: e.target.value } })} className={inp} placeholder="chat_id" /><button type="button" onClick={() => test(v.branches[b.id], 'سكرتارية ' + b.name)} className="px-3 bg-gray-100 rounded-xl text-[10px] font-black shrink-0">تجربة</button></div></div>)}
+                            <div className="flex gap-2"><input dir="ltr" value={v.branches[b.id] || ''} onChange={e => setV({ ...v, branches: { ...v.branches, [b.id]: e.target.value } })} className={inp} placeholder="chat_id" /><button type="button" onClick={() => test(v.branches[b.id], 'سكرتارية ' + b.name, b.id)} className="px-3 bg-gray-100 rounded-xl text-[10px] font-black shrink-0">تجربة</button></div><Res k={b.id} /></div>)}
                         <button type="button" onClick={findChats} className="text-xs font-black text-gold-600">🔎 هات الشاتات اللي كلّمت البوت</button>
-                        {found && (found.length === 0 ? <p className="text-[10px] font-bold text-gray-400">مفيش رسايل جديدة للبوت — خلي السكرتيرة تبعتله رسالة وجربي تاني.</p> :
+                        {found && found.err && <div className="text-[10px] font-bold text-red-600 bg-red-50 rounded-xl p-2" dir="auto">تيليجرام رد بخطأ: <span dir="ltr">{found.err}</span>{/webhook/i.test(found.err) ? ' — البوت ده متوصّل بخدمة تانية (webhook)، فمش بيقدر يجيب الرسايل بالطريقة دي. استخدمي بوت جديد للعيادة أو ابعتيلي.' : ''}</div>}
+                        {found && !found.err && (found.length === 0 ? <div className="text-[10px] font-bold text-gray-500 bg-amber-50 rounded-xl p-3 space-y-1 leading-relaxed">
+                                <p className="text-amber-800">مفيش رسايل وصلت للبوت. جربي كده:</p>
+                                <p>• <b>لو جروب:</b> البوت في الجروبات مش بيشوف الرسايل العادية، بيشوف الأوامر بس. ابعتي في الجروب <b dir="ltr">/start</b> بالظبط، وبعدها دوسي "هات الشاتات" تاني.</p>
+                                <p>• <b>لو شات خاص:</b> اتأكدي إنها بعتت لنفس البوت اللي التوكن بتاعه هنا، ودوست Start.</p>
+                                <p>• الرسايل اللي فاتت عليها أكتر من 24 ساعة مش بتظهر، فابعتي رسالة جديدة.</p>
+                            </div> :
                             <div className="bg-gray-50 rounded-xl p-2 space-y-1">{found.map(([id, name]) => <div key={id} className="flex items-center justify-between gap-2 text-[11px] font-bold"><span className="truncate">{name}</span><span className="flex items-center gap-1 shrink-0"><span dir="ltr" className="font-mono text-gray-500">{id}</span>
                                 <select defaultValue="" onChange={e => { const t = e.target.value; if (!t) return; if (t === 'main') setV(p => ({ ...p, main: id })); else setV(p => ({ ...p, branches: { ...p.branches, [t]: id } })); e.target.value = ''; }} className="text-[10px] bg-white border rounded-lg p-1"><option value="">حطه لـ...</option><option value="main">الإدارة</option>{branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></span></div>)}</div>)}
                     </div>
