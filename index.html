@@ -75,45 +75,60 @@
         const auth = firebase.auth();
         
         // كود السوبر أدمن الأولي (1279): بيتسجل أول مرة بس، وبعدها يتغير من الإعدادات → كود السوبر أدمن
+        // أول تشغيل على قاعدة بيانات فاضية بس: يوزر 1279 وباسورد 1279 (يتغيروا من الإعدادات بعدها)
         const BOOTSTRAP_CODE = "1279";
 
-        // ===== تأمين الدخول: كل كود موظف ليه حساب دخول في Firebase Auth (من غير ما شكل الدخول يتغير) =====
+        // ===== الدخول: اسم مستخدم + كلمة سر (أي طول) =====
+        // كل يوزر+باسورد ليهم حساب دخول في Firebase Auth، والإيميل/الباسورد الحقيقيين مشتقين منهم ومحدش يشوفهم.
         const sha256Hex = async (str) => {
             const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
             return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
         };
-        const authCreds = async (code) => {
+        const normUser = u => String(u || '').trim().toLowerCase().replace(/\s+/g, '');
+        const authCreds = async (username, password) => {
+            const h = await sha256Hex('newera-clinic|v2|' + normUser(username) + '|' + String(password || ''));
+            return { email: 'u' + h.slice(0, 32) + '@neweraclinic.app', password: h.slice(32, 64) + 'Ne!' };
+        };
+        // الأكواد القديمة (4 أرقام) — للانتقال بس
+        const legacyCreds = async (code) => {
             const h = await sha256Hex('newera-clinic|' + String(code).trim());
             return { email: 'u' + h.slice(0, 32) + '@neweraclinic.app', password: h.slice(32, 64) + 'Ne!' };
         };
         let secApp = null;
         const getSecAuth = () => { if (!secApp) secApp = firebase.initializeApp(firebaseConfig, 'sec'); return secApp.auth(); };
-        const ensureAuthUser = async (code) => {
-            const { email, password } = await authCreds(code);
+        const ensureAuthUser = async (username, password) => {
+            const { email, password: pw } = await authCreds(username, password);
             const sa = getSecAuth();
             let cred;
-            try { cred = await sa.createUserWithEmailAndPassword(email, password); }
-            catch (e) { if (e.code === 'auth/email-already-in-use') cred = await sa.signInWithEmailAndPassword(email, password); else throw e; }
+            try { cred = await sa.createUserWithEmailAndPassword(email, pw); }
+            catch (e) { if (e.code === 'auth/email-already-in-use') cred = await sa.signInWithEmailAndPassword(email, pw); else throw e; }
             const uid = cred.user.uid;
             await sa.signOut();
             return uid;
         };
-        // حفظ موظف + كوده + حساب دخوله في عملية واحدة.
-        // الكود نفسه بيتحفظ في staff_codes (السوبر أدمن بس يقدر يقراها) ومش بيتحفظ في staff_members.
+        const validUser = u => /^[^\s]{3,40}$/.test(u);
+        const validPass = p => typeof p === 'string' && p.length >= 4 && p.length <= 100;
+        // حفظ موظف + اليوزر والباسورد + حساب الدخول في عملية واحدة.
+        // اليوزر والباسورد في staff_codes (السوبر أدمن بس يقدر يقراها) ومش في staff_members.
         const saveStaff = async (staffId, d, prev) => {
-            const code = String(d.code || '').trim();
-            if (!/^\d{4}$/.test(code)) throw new Error('الكود لازم يكون 4 أرقام');
-            const sameCode = prev && prev.authUid && String(prev.code || '').trim() === code;
-            const uid = sameCode ? prev.authUid : await ensureAuthUser(code);
+            const username = normUser(d.username);
+            const password = String(d.password || '');
+            if (!validUser(username)) throw new Error('اسم المستخدم من 3 لـ 40 حرف ومن غير مسافات');
+            if (!validPass(password)) throw new Error('كلمة السر لازم تكون 4 حروف/أرقام على الأقل');
+            const dup = await db.collection('staff_codes').where('username', '==', username).get();
+            if (dup.docs.some(x => x.id !== staffId)) throw new Error('اسم المستخدم ده مستخدم لموظف تاني');
+            const same = prev && prev.authUid && normUser(prev.username) === username && prev.password === password;
+            const uid = same ? prev.authUid : await ensureAuthUser(username, password);
             const ex = await db.collection('staff_auth').doc(uid).get();
-            if (ex.exists && ex.data().staffId && ex.data().staffId !== staffId) throw new Error('الكود ده مستخدم لموظف تاني — غيّريه');
-            const { code: _c, ...rest } = d;
+            if (ex.exists && ex.data().staffId && ex.data().staffId !== staffId) throw new Error('اليوزر ده مستخدم لموظف تاني — غيّريه');
+            const { username: _u, password: _p, code: _c, ...rest } = d;
             const b = db.batch();
             if (prev && prev.authUid && prev.authUid !== uid) b.delete(db.collection('staff_auth').doc(prev.authUid));
             b.set(db.collection('staff_members').doc(staffId), { ...rest, authUid: uid, code: firebase.firestore.FieldValue.delete() }, { merge: true });
-            b.set(db.collection('staff_codes').doc(staffId), { code });
-            b.set(db.collection('staff_auth').doc(uid), { staffId, role: d.role, name: d.name });
+            b.set(db.collection('staff_codes').doc(staffId), { username, password });
+            b.set(db.collection('staff_auth').doc(uid), { staffId, role: d.role, name: d.name, username });
             await b.commit();
+            return uid;
         };
         const removeStaff = (st) => {
             const b = db.batch();
@@ -123,54 +138,53 @@
             b.delete(db.collection('staff_members').doc(st.id));
             return b.commit();
         };
-        // نقل الأكواد القديمة من staff_members لـ staff_codes (بيشتغل لوحده أول ما السوبر أدمن يدخل)
+        // تحويل الأكواد القديمة ليوزر وباسورد (بيشتغل لوحده أول ما السوبر أدمن يدخل):
+        // كل موظف كان ليه كود 1234 بقى: اليوزر = 1234 والباسورد = 1234 لحد ما تغيّريهم.
+        // بيرجّع { n, self } — self = true لو حساب السوبر أدمن نفسه اتحوّل (لازم إعادة تحميل)
         const migrateAllStaff = async () => {
-            const sn = await db.collection('staff_members').get(); let n = 0;
-            for (const d of sn.docs) {
-                const st = d.data();
-                if (st.code === undefined || st.code === null) continue;
+            const [sm, sc] = await Promise.all([db.collection('staff_members').get(), db.collection('staff_codes').get()]);
+            const codes = {}; sc.docs.forEach(x => codes[x.id] = x.data());
+            const me = auth.currentUser && auth.currentUser.uid;
+            let n = 0, selfJob = null;
+            for (const d of sm.docs) {
+                const st = d.data(), c = codes[d.id] || {};
                 try {
-                    if (String(st.code).trim()) await saveStaff(d.id, { ...st, code: String(st.code).trim() }, st.authUid ? { ...st, code: String(st.code).trim() } : null);
-                    else await d.ref.update({ code: firebase.firestore.FieldValue.delete() });
-                    n++;
+                    if (c.username) { if (st.code !== undefined) await d.ref.update({ code: firebase.firestore.FieldValue.delete() }); continue; }
+                    const code = String(c.code ?? st.code ?? '').trim();
+                    if (!code) continue;
+                    const run = () => saveStaff(d.id, { ...st, username: code, password: code }, st.authUid ? { ...st, username: '', password: '' } : null);
+                    if (st.authUid && st.authUid === me) { selfJob = { run, code }; continue; }
+                    await run(); n++;
                 } catch (e) { console.error('migrate', d.id, e); }
             }
-            return n;
+            if (selfJob) {
+                await selfJob.run(); n++;
+                const cr = await authCreds(selfJob.code, selfJob.code);
+                await auth.signInWithEmailAndPassword(cr.email, cr.password);
+                return { n, self: true };
+            }
+            return { n, self: false };
         };
-        // بعد ما الحساب يدخل: نجيب بيانات الموظف من staff_auth (من غير ما ندوّر بالكود)
+        // بعد ما الحساب يدخل: نجيب بيانات الموظف من staff_auth
         const loadStaffForUid = async (uid) => {
             const sa = await db.collection('staff_auth').doc(uid).get();
             if (!sa.exists || !sa.data().staffId) return null;
             const m = await db.collection('staff_members').doc(sa.data().staffId).get();
             if (!m.exists) return null;
             const { code: _c, ...rest } = m.data();
-            return { id: m.id, ...rest, authUid: uid };
-        };
-        // للنظام القديم بس (قبل القواعد الجديدة): بتفشل بهدوء تحت القواعد الجديدة
-        const legacyHeal = async (code) => {
-            try {
-                await auth.signInAnonymously();
-                const sn = await db.collection('staff_members').where('code', '==', code).limit(1).get();
-                if (sn.empty) { await auth.signOut(); return false; }
-                const d = sn.docs[0];
-                await saveStaff(d.id, d.data(), null);
-                const { email, password } = await authCreds(code);
-                await auth.signInWithEmailAndPassword(email, password);
-                return true;
-            } catch (e) { try { await auth.signOut(); } catch (x) {} return false; }
+            return { id: m.id, ...rest, authUid: uid, username: sa.data().username || '' };
         };
         // أول تشغيل على قاعدة بيانات جديدة فاضية بس (تحت القواعد الجديدة مش بيقدر يعمل حاجة — وده المطلوب)
         const bootstrapMaster = async () => {
             try {
-                const n = BOOTSTRAP_CODE;
                 await auth.signInAnonymously();
                 const sup = await db.collection('staff_members').where('role', '==', 'superadmin').limit(1).get();
-                if (!sup.empty) return false;
-                const sd = { name: 'Admin', code: n, role: 'superadmin', branchId: 'all', branchIds: [], jobTitle: 'سوبر أدمن' };
-                const ref = db.collection('staff_members').doc();
-                await saveStaff(ref.id, sd, null);
-                return n;
-            } catch (e) { return false; }
+                if (!sup.empty) { await auth.signOut(); return false; }
+                const sd = { name: 'Admin', username: BOOTSTRAP_CODE, password: BOOTSTRAP_CODE, role: 'superadmin', branchId: 'all', branchIds: [], jobTitle: 'سوبر أدمن' };
+                await saveStaff(db.collection('staff_members').doc().id, sd, null);
+                await auth.signOut();
+                return true;
+            } catch (e) { try { await auth.signOut(); } catch (x) {} return false; }
         };
         // فروع الطبيب: القائمة الجديدة (branchIds) أو الفرع القديم (branchId)
         // ===== التنبيهات المجانية =====
@@ -417,6 +431,12 @@
                     {withStore && <option value="store">الإدارة / المخزن الرئيسي</option>}{branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></div>;
         }
         function WaBtn({ c, phone }) { const has = phone || c.labPhone; return <a href={waLink(c, phone)} target={WA_TARGET} rel="noreferrer" title={has ? '' : 'مفيش رقم للمعمل — هتختاري جهة الاتصال من واتساب'} className="px-2 py-1 bg-green-500 text-white rounded-lg text-[10px] font-bold">{has ? 'واتساب للمعمل' : 'واتساب (اختاري المعمل)'}</a>; }
+        // أيام عمل الدكتور: schedule = { branchId: [0..6] } (0 = الأحد). مفيش أيام متحددة = متاح كل الأيام
+        const DAY_NAMES = ['الأحد', 'الإثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
+        const DAY_ORDER = [6, 0, 1, 2, 3, 4, 5];
+        const dowOf = date => new Date(date + 'T00:00:00').getDay();
+        const doctorWorks = (doc, branchId, date) => { const days = doc && doc.schedule && doc.schedule[branchId]; return !date || !Array.isArray(days) || !days.length || days.includes(dowOf(date)); };
+        const daysText = days => (Array.isArray(days) && days.length) ? DAY_ORDER.filter(x => days.includes(x)).map(x => DAY_NAMES[x]).join('، ') : 'كل الأيام';
         const doctorBranchIds = (s, branches) => (Array.isArray(s.branchIds) && s.branchIds.length) ? s.branchIds : (s.branchId === 'all' ? branches.map(b => b.id) : [s.branchId]);
 
         // --- Icons ---
@@ -529,6 +549,29 @@
             }, [data.appointments, data.dues, data.shortages, currentUser]);
             useEffect(() => { if (!alerts.length) return; const t = setTimeout(() => setAlerts([]), 12000); return () => clearTimeout(t); }, [alerts]);
             useEffect(() => { const h = () => { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); document.removeEventListener('click', h); }; document.addEventListener('click', h); return () => document.removeEventListener('click', h); }, []);
+            // الكنسل والتأجيل: المريض بيتسجل تلقائي في سجل المرضى (أو بيتحدّث لو موجود) عشان نتابع معاه
+            useEffect(() => {
+                if (!currentUser || currentUser.role === 'doctor') return;
+                const norm = ph => String(ph || '').replace(/\D/g, '').slice(-10);
+                data.appointments.filter(a => (a.status === 'canceled' || a.status === 'postponed') && !a.followLogged && (a.statusChangedAt || a.canceledAt)
+                    && (currentUser.role !== 'employee' || a.branchId === currentUser.branchId)).forEach(a => {
+                    const ref = db.collection('appointments').doc(a.id);
+                    db.runTransaction(async tx => { const sn = await tx.get(ref); if (!sn.exists || sn.data().followLogged) return false; tx.update(ref, { followLogged: true }); return true; }).then(async won => {
+                        if (!won) return;
+                        const kind = a.status === 'canceled' ? (a.canceledBy === 'patient' ? 'المريض لغى الحجز أونلاين' : 'كنسل') : 'أجّل';
+                        const ev = kind + ' موعد ' + a.date + (a.time ? ' ' + a.time : '') + (a.service ? ' — ' + a.service : '');
+                        const today = localDay();
+                        const svcs = SERVICES.filter(x => (a.service || '').includes(x));
+                        const ex = a.phone ? data.patients.find(p => p.branchId === a.branchId && norm(p.phone) && norm(p.phone) === norm(a.phone)) : null;
+                        if (ex) {
+                            await db.collection('patients').doc(ex.id).update({ followUpDate: today, followedAt: '', followRemind: false, lastEvent: ev, lastEventAt: new Date().toISOString(), ...(ex.doctorId ? {} : { doctorId: a.doctorId || '' }), ...(svcs.length ? { services: [...new Set([...(ex.services || []), ...svcs])] } : {}) });
+                        } else {
+                            await db.collection('patients').add({ fileNo: '', name: a.patientName || '', phone: a.phone || '', address: '', services: svcs, service: a.service || '', doctorId: a.doctorId || '', branchId: a.branchId, followUpDays: 0, followUpDate: today, followedAt: '', followRemind: false, lastEvent: ev, lastEventAt: new Date().toISOString(), source: a.status, recordedBy: 'تلقائي (' + (a.status === 'canceled' ? 'كنسل' : 'تأجيل') + ')' });
+                        }
+                    }).catch(e => console.error('follow-up log', e));
+                });
+            }, [data.appointments, currentUser]);
+
             // تذكير المعمل بعد المدة المحددة لكل حالة (يظهر + تيليجرام مرة واحدة لكل حالة)
             useEffect(() => {
                 if (!currentUser || currentUser.role === 'doctor') return;
@@ -598,12 +641,14 @@
                 // الطبيب بيقرا حالاته وحجوزاته هو بس (القواعد كمان بتمنعه من غير كده)
                 const isDocU = currentUser?.role === 'doctor';
                 const mineQ = col => isDocU ? db.collection(col).where('doctorId', '==', currentUser.id) : db.collection(col);
+                // بنحمّل حجوزات آخر 4 شهور + الجاية بس (بدل كل الحجوزات من أول يوم) عشان القراءات متكبرش مع الوقت
+                const appsQ = isDocU ? mineQ('appointments') : db.collection('appointments').where('date', '>=', dayShift(localDay(), -120));
                 const none = () => () => {};
                 const unsub3 = mineQ('patients').onSnapshot(
                     s => setData(d => ({...d, patients: s.docs.map(x => ({id: x.id, ...x.data()}))})),
                     err => console.error(err)
                 );
-                const unsub4 = mineQ('appointments').onSnapshot(
+                const unsub4 = appsQ.onSnapshot(
                     s => { notify('appointments', s); setData(d => ({...d, appointments: s.docs.map(x => ({id: x.id, ...x.data()}))})); },
                     err => console.error(err)
                 );
@@ -638,7 +683,7 @@
                     const m = {}; s.docs.forEach(x => m[x.id] = Number(x.data().amount || 0)); setCosts(m);
                 }, err => console.error(err));
                 const u2 = db.collection('staff_codes').onSnapshot(s => {
-                    const m = {}; s.docs.forEach(x => m[x.id] = x.data().code); setStaffCodes(m);
+                    const m = {}; s.docs.forEach(x => m[x.id] = x.data()); setStaffCodes(m);
                 }, err => console.error(err));
                 return () => { u1(); u2(); };
             }, [currentUser]);
@@ -650,10 +695,10 @@
                 const t = setTimeout(async () => {
                     try {
                         const want = {};
-                        data.staff.filter(x => x.role === 'doctor').forEach(x => { want[x.id] = { name: x.name || '', branchIds: doctorBranchIds(x, data.branches) }; });
+                        data.staff.filter(x => x.role === 'doctor').forEach(x => { want[x.id] = { name: x.name || '', branchIds: doctorBranchIds(x, data.branches), days: x.schedule || {} }; });
                         const have = await db.collection('public_doctors').get();
                         const b = db.batch(); let n = 0;
-                        Object.entries(want).forEach(([id, v]) => { const h = have.docs.find(x => x.id === id); if (!h || h.data().name !== v.name || JSON.stringify(h.data().branchIds) !== JSON.stringify(v.branchIds)) { b.set(db.collection('public_doctors').doc(id), v); n++; } });
+                        Object.entries(want).forEach(([id, v]) => { const h = have.docs.find(x => x.id === id); if (!h || h.data().name !== v.name || JSON.stringify(h.data().branchIds) !== JSON.stringify(v.branchIds) || JSON.stringify(h.data().days || {}) !== JSON.stringify(v.days)) { b.set(db.collection('public_doctors').doc(id), v); n++; } });
                         have.docs.forEach(x => { if (!want[x.id]) { b.delete(x.ref); n++; } });
                         if (n) await b.commit();
                     } catch (e) { console.error('public_doctors sync', e); }
@@ -697,34 +742,29 @@
             };
             const afterLogin = (found) => {
                 finishLogin(found);
-                if (found.role === 'superadmin') migrateAllStaff().then(n => { if (n) setToastMsg('تم تأمين أكواد ' + n + ' موظف'); }).catch(() => {});
+                if (found.role === 'superadmin') migrateAllStaff().then(r => {
+                    if (r.self) { alert('تم تحويل الدخول لـ "اسم مستخدم + كلمة سر".\nكل موظف: اسم المستخدم وكلمة السر = كوده القديم، لحد ما تغيّريهم من الإعدادات → الموظفين.'); window.location.reload(); }
+                    else if (r.n) setToastMsg('تم تحويل ' + r.n + ' موظف لاسم مستخدم وكلمة سر');
+                }).catch(e => console.error(e));
             };
-            const loginByCode = async (code, remember) => {
-                const { email, password } = await authCreds(code);
-                // "تذكرني": الجلسة بتفضل محفوظة على الجهاز من غير ما نخزن الكود نفسه
+            const loginWith = async (cr) => { try { await auth.signInWithEmailAndPassword(cr.email, cr.password); return true; } catch (e) { if (e.code === 'auth/too-many-requests' || e.code === 'auth/network-request-failed' || e.code === 'auth/operation-not-allowed') throw e; return false; } };
+            const loginByCreds = async (username, password, remember) => {
                 try { await auth.setPersistence(remember === false ? firebase.auth.Auth.Persistence.SESSION : firebase.auth.Auth.Persistence.LOCAL); } catch (e) {}
-                let ok = false;
-                try { await auth.signInWithEmailAndPassword(email, password); ok = true; }
-                catch (e) {
-                    if (e.code === 'auth/too-many-requests' || e.code === 'auth/network-request-failed' || e.code === 'auth/operation-not-allowed') throw e;
-                    // الكود غلط (أو مالوش حساب) — legacyHeal مش بيشتغل تحت القواعد الجديدة فمش بنستخدمه
-                }
+                let ok = await loginWith(await authCreds(username, password));
+                // فترة الانتقال: موظف لسه بكوده القديم (اليوزر = الباسورد = الكود)
+                if (!ok && /^\d{4}$/.test(username) && password === username) ok = await loginWith(await legacyCreds(username));
                 if (!ok || !auth.currentUser) return false;
                 const found = await loadStaffForUid(auth.currentUser.uid);
                 if (!found) { await auth.signOut().catch(() => {}); return false; }
-                afterLogin({ ...found, code });
+                afterLogin(found);
                 return true;
             };
-            const doLogin = async (rawCode, remember) => {
-                const code = String(rawCode || '').trim();
-                if (!code) return false;
+            const doLogin = async (rawUser, rawPass, remember) => {
+                const username = normUser(rawUser), password = String(rawPass || '');
+                if (!username || !password) return false;
                 try {
-                    if (await loginByCode(code, remember)) return code;
-                    if (code === BOOTSTRAP_CODE) {
-                        // أول تشغيل على قاعدة بيانات فاضية بس
-                        const created = await bootstrapMaster();
-                        if (created) return (await loginByCode(code, remember)) ? code : false;
-                    }
+                    if (await loginByCreds(username, password, remember)) return true;
+                    if (username === BOOTSTRAP_CODE && password === BOOTSTRAP_CODE && await bootstrapMaster()) return await loginByCreds(username, password, remember);
                     return false;
                 } catch (e) {
                     console.error(e);
@@ -745,7 +785,7 @@
                         }
                         // أجهزة كانت حافظة الكود نفسه (النسخة القديمة): ندخل بيه مرة ونمسحه
                         const old = localStorage.getItem('newEraSavedCode');
-                        if (old) { localStorage.removeItem('newEraSavedCode'); await doLogin(old, true); }
+                        if (old) { localStorage.removeItem('newEraSavedCode'); await doLogin(old, old, true); }
                     } catch (e) { console.error(e); }
                     finally { setAuthChecked(true); }
                 });
@@ -771,7 +811,7 @@
             }, [data, currentUser, selectedBranch]);
 
             if (!isLoggedIn) return authChecked ? <LoginView onLogin={doLogin} /> : <div className="h-screen bg-[#050505] flex items-center justify-center text-gold-500 font-black">...</div>;
-            const staffFull = data.staff.map(s => staffCodes[s.id] !== undefined ? { ...s, code: staffCodes[s.id] } : s);
+            const staffFull = data.staff.map(s => staffCodes[s.id] ? { ...s, username: staffCodes[s.id].username || '', password: staffCodes[s.id].password || '' } : s);
 
             const isSuperAdmin = currentUser.role === 'superadmin';
             const isAdminOrSuper = currentUser.role === 'admin' || currentUser.role === 'superadmin';
@@ -888,13 +928,13 @@
                         </header>
 
                         <div className="flex-1 p-3 md:p-8 overflow-y-auto w-full custom-scrollbar pb-20">
-                            {activeTab === 'dashboard' && !isDoctor && <DashboardStats data={filteredData} userRole={currentUser.role} onNav={navigateTo} />}
+                            {activeTab === 'dashboard' && !isDoctor && <DashboardStats data={filteredData} userRole={currentUser.role} onNav={navigateTo} selectedBranch={currentUser.role === 'employee' ? currentUser.branchId : selectedBranch} staff={data.staff} />}
                                                         {activeTab === 'patients' && <PatientsView staff={data.staff} focusId={focus?.tab === 'patients' ? focus.id : null} patients={filteredData.patients} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'patient', mode:'add'})} onEdit={(d)=>setModal({type:'patient', mode:'edit', data:d})} showToast={setToastMsg} />}
                             {activeTab === 'appointments' && <AppointmentsView focusIds={focus?.tab === 'appointments' ? focus.ids : null} apps={filteredData.appointments} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'app', mode:'add'})} onEdit={(d)=>setModal({type:'app', mode:'edit', data:d})} onNav={navigateTo} showToast={setToastMsg} />}
                             {activeTab === 'daily' && currentUser.role === 'employee' && <DailyView payments={data.payments} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'payment', mode:'add', data:{branchId:currentUser.branchId}})} onEdit={(d)=>setModal({type:'payment', mode:'edit', data:d})} showToast={setToastMsg} />}
                             {activeTab === 'finance' && isSuperAdmin && <FinanceView payments={filteredData.payments} branches={data.branches} selectedBranch={selectedBranch} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={(bId)=>setModal({type:'payment', mode:'add', data:{branchId:bId}})} onEdit={(d)=>setModal({type:'payment', mode:'edit', data:d})} showToast={setToastMsg} />}
                                                         {activeTab === 'labs' && <LabsView focusId={focus?.tab === 'labs' ? focus.id : null} cases={filteredData.labCases} costs={costs} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'lab', mode:'add'})} onEdit={(d)=>setModal({type:'lab', mode:'edit', data:d})} showToast={setToastMsg} />}
-                            {activeTab === 'settings' && isAdminOrSuper && <SettingsView sections={[{ k: 'branches', label: 'الفروع', node: <BranchesView branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'branch', mode:'add'})} onEdit={(d)=>setModal({type:'branch', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'templates', label: 'قوالب الرسائل', node: <TemplatesView showToast={setToastMsg} /> }, ...(isSuperAdmin ? [{ k: 'staff', label: 'الموظفين', node: <StaffView staff={staffFull} branches={data.branches} onConfirm={setConfirmAction} onAdd={(k)=>setModal({type:'staff', mode:'add', data:{kind:k}})} onEdit={(d)=>setModal({type:'staff', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'mycode', label: 'كود السوبر أدمن', node: <MasterCodeView currentUser={currentUser} showToast={setToastMsg} /> }, { k: 'telegram', label: 'تيليجرام', node: <TelegramView showToast={setToastMsg} /> }] : [])]} />}
+                            {activeTab === 'settings' && isAdminOrSuper && <SettingsView sections={[{ k: 'branches', label: 'الفروع', node: <BranchesView branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'branch', mode:'add'})} onEdit={(d)=>setModal({type:'branch', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'templates', label: 'قوالب الرسائل', node: <TemplatesView showToast={setToastMsg} /> }, ...(isSuperAdmin ? [{ k: 'staff', label: 'الموظفين', node: <StaffView staff={staffFull} branches={data.branches} onConfirm={setConfirmAction} onAdd={(k)=>setModal({type:'staff', mode:'add', data:{kind:k}})} onEdit={(d)=>setModal({type:'staff', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'mycode', label: 'حسابي', node: <MasterCodeView currentUser={currentUser} showToast={setToastMsg} /> }, { k: 'telegram', label: 'تيليجرام', node: <TelegramView showToast={setToastMsg} /> }] : [])]} />}
                             {activeTab === 'dues' && !isDoctor && <DuesView focusIds={focus?.tab === 'dues' ? focus.ids : null} items={filteredData.dues} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'due', mode:'add'})} onEdit={(d)=>setModal({type:'due', mode:'edit', data:d})} showToast={setToastMsg} />}
                                                         {activeTab === 'consumables' && isAdminOrSuper && <ConsumablesView allItems={data.consumables} items={filteredData.consumables} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'consumable', mode:'add', data:{kind:'purchase'}})} onEdit={(d)=>setModal({type:'consumable', mode:'edit', data:d})} showToast={setToastMsg} />}
                             {activeTab === 'shortages' && !isDoctor && <ShortagesView focusIds={focus?.tab === 'shortages' ? focus.ids : null} onBuy={(it)=> !isAdminOrSuper ? setConfirmAction({msg:'هل تم توفير وشراء هذا الصنف؟', onConfirm:()=>db.collection('shortages').doc(it.id).delete().then(()=>setToastMsg('تم')).catch(err=>setToastMsg('مشكلة: '+err.message))}) : quickBuy(it)} shortages={filteredData.shortages} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onEdit={(d)=>setModal({type:'shortage', mode:'edit', data:d})} showToast={setToastMsg} />}
@@ -905,53 +945,45 @@
         }
 
         function LoginView({ onLogin }) {
-            const [code, setCode] = useState(['', '', '', '']);
+            const [user, setUser] = useState('');
+            const [pass, setPass] = useState('');
+            const [show, setShow] = useState(false);
             const [rememberMe, setRememberMe] = useState(true);
-            const inputRefs = useRef([]);
-
             const [busy, setBusy] = useState(false);
+            const [err, setErr] = useState('');
+            const passRef = useRef(null);
 
-            const handleChange = (index, value) => {
-                if (!/^[0-9]*$/.test(value)) return;
-                const newCode = [...code]; newCode[index] = value.slice(-1); setCode(newCode);
-                if (value && index < 3) inputRefs.current[index + 1].focus();
-            };
-
-            const handleKeyDown = (index, e) => {
-                if (e.key === 'Backspace' && !code[index] && index > 0) inputRefs.current[index - 1].focus();
-                else if (e.key === 'Enter') attemptLogin();
-            };
-
-            const attemptLogin = async () => {
+            const attemptLogin = async (e) => {
+                e && e.preventDefault();
                 if (busy) return;
-                const fullCode = code.join('');
-                setBusy(true);
-                const success = await onLogin(fullCode, rememberMe);
+                setErr(''); setBusy(true);
+                const ok = await onLogin(user, pass, rememberMe);
                 setBusy(false);
-                if (!success) {
-                    alert("كود الدخول غير صحيح!");
-                    setCode(['', '', '', '']);
-                    inputRefs.current[0].focus();
-                }
+                if (!ok) { setErr('اسم المستخدم أو كلمة السر غلط'); setPass(''); passRef.current && passRef.current.focus(); }
             };
+            const field = "w-full bg-black/80 border border-white/10 rounded-2xl px-4 py-3.5 text-base font-bold text-white placeholder-gray-600 focus:border-gold-500 outline-none transition-all shadow-inner";
 
             return (
                 <div className="h-screen bg-[#050505] flex items-center justify-center p-6 text-center w-full relative overflow-hidden">
                     <div className="absolute top-0 right-0 w-96 h-96 bg-gold-600/10 rounded-full blur-[120px] -translate-y-1/2 translate-x-1/2"></div>
-                    <div className="w-full max-w-md bg-[#111111] p-10 rounded-[40px] border border-white/5 shadow-2xl relative z-10 flex flex-col items-center animate-scale-in">
-                        <img src="https://i.ibb.co/qLw7Tcqv/logo-Dr-shahenda-original.png" className="w-64 mb-8 drop-shadow-[0_0_15px_rgba(245,158,11,0.2)]" />
-                        <p className="text-gray-400 text-sm mb-6 font-bold tracking-widest uppercase">أدخل الكود الخاص بك</p>
-                        <div className="flex gap-4 mb-6" dir="ltr">
-                            {[0, 1, 2, 3].map((index) => (
-                                <input key={index} ref={el => inputRefs.current[index] = el} type="password" inputMode="numeric" value={code[index]} onChange={(e) => handleChange(index, e.target.value)} onKeyDown={(e) => handleKeyDown(index, e)} className="w-14 h-16 bg-black/80 border border-white/10 rounded-2xl text-center text-3xl font-black text-gold-500 focus:border-gold-500 outline-none transition-all shadow-inner" />
-                            ))}
+                    <form onSubmit={attemptLogin} className="w-full max-w-md bg-[#111111] p-8 sm:p-10 rounded-[40px] border border-white/5 shadow-2xl relative z-10 flex flex-col items-center animate-scale-in">
+                        <img src="https://i.ibb.co/qLw7Tcqv/logo-Dr-shahenda-original.png" className="w-56 mb-8 drop-shadow-[0_0_15px_rgba(245,158,11,0.2)]" />
+                        <div className="w-full space-y-3 mb-4 text-right">
+                            <label className="block text-gray-400 text-xs font-bold">اسم المستخدم</label>
+                            <input autoFocus autoComplete="username" autoCapitalize="none" spellCheck="false" dir="ltr" value={user} onChange={e => setUser(e.target.value)} className={field} />
+                            <label className="block text-gray-400 text-xs font-bold pt-1">كلمة السر</label>
+                            <div className="relative">
+                                <input ref={passRef} type={show ? 'text' : 'password'} autoComplete="current-password" dir="ltr" value={pass} onChange={e => setPass(e.target.value)} className={field + ' pl-16'} />
+                                <button type="button" onClick={() => setShow(!show)} className="absolute left-3 top-1/2 -translate-y-1/2 text-[11px] font-black text-gray-400 hover:text-gold-500">{show ? 'إخفاء' : 'إظهار'}</button>
+                            </div>
                         </div>
-                        <label className="flex items-center gap-2 text-gray-400 text-sm font-bold mb-8 cursor-pointer hover:text-gold-500 transition-colors">
+                        {err && <p className="w-full text-red-400 text-sm font-bold mb-3 bg-red-500/10 rounded-xl py-2">{err}</p>}
+                        <label className="flex items-center gap-2 text-gray-400 text-sm font-bold mb-6 cursor-pointer hover:text-gold-500 transition-colors self-start">
                             <input type="checkbox" checked={rememberMe} onChange={(e) => setRememberMe(e.target.checked)} className="rounded" />
-                            تذكرني (للدخول التلقائي)
+                            تذكرني على الجهاز ده
                         </label>
-                        <button type="button" onClick={attemptLogin} className="w-full bg-gradient-to-r from-gold-600 to-gold-400 text-black font-black py-4 rounded-2xl shadow-lg hover:scale-105 transition-transform text-lg">تـسـجـيـل الـدخـول</button>
-                    </div>
+                        <button type="submit" disabled={busy || !user.trim() || !pass} className="w-full bg-gradient-to-r from-gold-600 to-gold-400 text-black font-black py-4 rounded-2xl shadow-lg hover:scale-[1.02] transition-transform text-lg disabled:opacity-50 disabled:hover:scale-100">{busy ? 'جاري الدخول...' : 'تـسـجـيـل الـدخـول'}</button>
+                    </form>
                 </div>
             );
         }
@@ -965,23 +997,167 @@
             );
         }
 
-        function DashboardStats({ data, userRole, onNav }) {
-            const stats = [
-                { label: 'سجل المرضى', val: data.patients.length, icon: <IconUsers/>, tab: 'patients' },
-                { label: 'المواعيد القادمة', val: data.appointments.length, icon: <IconCalendar/>, tab: 'appointments' },
-                { label: 'النواقص', val: data.shortages.length, icon: <IconClipboard/>, tab: 'shortages' }
-            ];
-            if (userRole === 'superadmin') {
-                stats.push({ label: 'الإيرادات', val: data.payments.reduce((a,b) => a+Number(b.amount||0),0) + ' ج', icon: <IconWallet/>, tab: 'finance' });
-            }
+        // ===== لوحة التحكم =====
+        const sumAmt = a => Math.round(a.reduce((s, x) => s + (Number(x.amount) || 0), 0));
+        const fmtN = n => Number(n || 0).toLocaleString('en-US');
+        const AR_MONTHS = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو', 'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'];
+        const dayShift = (d, n) => { const x = new Date(d + 'T00:00:00'); x.setDate(x.getDate() + n); return x.toLocaleDateString('en-CA'); };
+
+        // عمود بيانات واحد (لون واحد) + قيمة تظهر باللمس/الماوس
+        function MiniBars({ points, unit = '', height = 150 }) {
+            const [hover, setHover] = useState(null);
+            const max = Math.max(1, ...points.map(p => p.v));
+            const W = 100 / points.length;
             return (
-                <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-6 animate-fade-in">
-                    {stats.map((s, i) => (
-                        <div key={i} onClick={() => onNav(s.tab)} className="bg-white p-4 sm:p-6 rounded-[20px] sm:rounded-[30px] border border-gray-100 shadow-sm cursor-pointer hover:-translate-y-1 transition-transform flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-5">
-                            <div className="w-10 h-10 sm:w-14 sm:h-14 rounded-xl sm:rounded-2xl bg-gray-50 text-gold-500 flex items-center justify-center shrink-0">{s.icon}</div>
-                            <div><p className="text-[9px] sm:text-[10px] font-black text-gray-400 uppercase tracking-widest">{s.label}</p><p className="text-lg sm:text-2xl font-black text-gray-800 tracking-tighter">{s.val}</p></div>
-                        </div>
-                    ))}
+                <div className="relative" dir="ltr">
+                    <svg viewBox={`0 0 100 ${height}`} preserveAspectRatio="none" className="w-full" style={{ height }}>
+                        {[0.25, 0.5, 0.75, 1].map(g => <line key={g} x1="0" x2="100" y1={height - 18 - (height - 30) * g} y2={height - 18 - (height - 30) * g} stroke="#F3F4F6" strokeWidth="0.4" vectorEffect="non-scaling-stroke" />)}
+                        {points.map((p, i) => {
+                            const h = (height - 30) * p.v / max, x = i * W + W * 0.18, w = W * 0.64;
+                            return <g key={i} onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)} onClick={() => setHover(hover === i ? null : i)} style={{ cursor: 'pointer' }}>
+                                <rect x={i * W} y="0" width={W} height={height - 18} fill="transparent" />
+                                <rect x={x} y={height - 18 - Math.max(h, p.v ? 1.5 : 0)} width={w} height={Math.max(h, p.v ? 1.5 : 0)} rx="1" fill={hover === i || p.hl ? '#B45309' : '#F59E0B'} opacity={hover === null || hover === i ? 1 : 0.55} />
+                            </g>;
+                        })}
+                    </svg>
+                    <div className="absolute inset-x-0 bottom-0 flex text-[9px] text-gray-400 font-bold">{points.map((p, i) => <span key={i} className="text-center truncate" style={{ width: W + '%' }}>{p.l}</span>)}</div>
+                    {hover !== null && <div className="absolute -top-1 bg-gray-900 text-white text-[10px] font-black px-2 py-1 rounded-lg pointer-events-none whitespace-nowrap" style={{ left: `calc(${(hover + 0.5) * W}% )`, transform: 'translateX(-50%)' }}>{points[hover].t || points[hover].l}: {fmtN(points[hover].v)}{unit}</div>}
+                </div>
+            );
+        }
+        function RankBars({ rows, unit = '', empty }) {
+            if (!rows.length) return <p className="text-xs text-gray-400 font-bold py-6 text-center">{empty}</p>;
+            const max = Math.max(1, ...rows.map(r => r.v));
+            return <div className="space-y-2.5">{rows.map(r => (
+                <div key={r.l}>
+                    <div className="flex justify-between text-[11px] font-bold mb-1"><span className="text-gray-700 truncate">{r.l}</span><span className="text-gray-900 font-black">{fmtN(r.v)}{unit}</span></div>
+                    <div className="h-2 bg-gray-100 rounded-full overflow-hidden"><div className="h-full bg-gold-500 rounded-full" style={{ width: (r.v / max * 100) + '%' }}></div></div>
+                </div>))}</div>;
+        }
+        function Panel({ title, sub, children, action }) {
+            return <div className="bg-white rounded-[20px] border border-gray-100 shadow-sm p-4 sm:p-5">
+                <div className="flex items-start justify-between gap-2 mb-4"><div><h4 className="text-sm font-black text-gray-800">{title}</h4>{sub && <p className="text-[10px] text-gray-400 font-bold mt-0.5">{sub}</p>}</div>{action}</div>
+                {children}</div>;
+        }
+
+        function DashboardStats({ data, userRole, onNav, selectedBranch, staff = [] }) {
+            const [period, setPeriod] = useState('month');
+            const isSuper = userRole === 'superadmin', isAdm = isSuper || userRole === 'admin';
+            const today = localDay();
+            const PER = {
+                today: { l: 'النهاردة', from: today, prevFrom: dayShift(today, -1), prevTo: dayShift(today, -1) },
+                week: { l: 'آخر 7 أيام', from: dayShift(today, -6), prevFrom: dayShift(today, -13), prevTo: dayShift(today, -7) },
+                month: { l: 'الشهر ده', from: today.slice(0, 7) + '-01', prevFrom: (() => { const d = new Date(today.slice(0, 7) + '-01T00:00:00'); d.setMonth(d.getMonth() - 1); return d.toLocaleDateString('en-CA'); })(), prevTo: dayShift(today.slice(0, 7) + '-01', -1) }
+            }[period];
+            const inP = d => d && d >= PER.from && d <= today;
+            const inPrev = d => d && d >= PER.prevFrom && d <= PER.prevTo;
+            const apps = data.appointments;
+            const pApps = apps.filter(a => inP(a.date));
+            const live = pApps.filter(a => a.status !== 'canceled' && a.status !== 'postponed');
+            const attended = pApps.filter(a => a.status === 'arrived' || a.status === 'done').length;
+            const dueForAttend = live.filter(a => a.date < today || a.status === 'arrived' || a.status === 'done').length;
+            const attendRate = dueForAttend ? Math.round(attended / dueForAttend * 100) : null;
+            const canceled = pApps.filter(a => a.status === 'canceled').length;
+            const online = pApps.filter(a => a.source === 'online').length;
+            const todayApps = apps.filter(a => a.date === today).sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+            const tomorrow = dayShift(today, 1);
+            const tmrUnconfirmed = apps.filter(a => a.date === tomorrow && (!a.status || a.status === 'unconfirmed' || a.status === 'booked'));
+            const followDue = data.patients.filter(p => p.followUpDate && !p.followedAt && p.followUpDate <= today);
+            const atLab = data.labCases.filter(c => c.status !== 'returned');
+            const labLate = data.labCases.filter(labDue);
+            const unpaid = data.dues.filter(d => !d.paid), overdue = unpaid.filter(d => d.dueDate && d.dueDate < today);
+            const rev = sumAmt(data.payments.filter(p => inP(p.date))), revPrev = sumAmt(data.payments.filter(p => inPrev(p.date)));
+            const revDelta = revPrev ? Math.round((rev - revPrev) / revPrev * 100) : null;
+            const appsPrev = apps.filter(a => inPrev(a.date)).length;
+            const appsDelta = appsPrev ? Math.round((pApps.length - appsPrev) / appsPrev * 100) : null;
+
+            const days14 = Array.from({ length: 14 }, (_, i) => dayShift(today, i - 13));
+            const bookingPts = days14.map(d => ({ l: d.slice(8), t: d, v: apps.filter(a => a.date === d && a.status !== 'canceled').length, hl: d === today }));
+            const months6 = Array.from({ length: 6 }, (_, i) => { const d = new Date(today.slice(0, 7) + '-01T00:00:00'); d.setMonth(d.getMonth() - 5 + i); return d.toLocaleDateString('en-CA').slice(0, 7); });
+            const revPts = months6.map(m => ({ l: AR_MONTHS[+m.slice(5) - 1].slice(0, 5), t: AR_MONTHS[+m.slice(5) - 1] + ' ' + m.slice(0, 4), v: sumAmt(data.payments.filter(p => (p.date || '').slice(0, 7) === m)) }));
+            const count = (arr, key) => Object.entries(arr.reduce((o, x) => { const k = key(x); if (k) o[k] = (o[k] || 0) + 1; return o; }, {})).map(([l, v]) => ({ l, v })).sort((a, b) => b.v - a.v).slice(0, 6);
+            const topServices = count(live, a => (a.service || '').trim());
+            const docName = id => (staff.find(s => s.id === id) || {}).name;
+            const byDoctor = count(live, a => a.doctorName || docName(a.doctorId)).map(r => ({ ...r, l: 'د. ' + r.l }));
+            const branchRows = selectedBranch === 'all' && isAdm ? data.branches.map(b => {
+                const ba = pApps.filter(a => a.branchId === b.id), bl = ba.filter(a => a.status !== 'canceled' && a.status !== 'postponed');
+                const att = ba.filter(a => a.status === 'arrived' || a.status === 'done').length, due = bl.filter(a => a.date < today || a.status === 'arrived' || a.status === 'done').length;
+                return { b, apps: ba.length, att: due ? Math.round(att / due * 100) : null, lab: atLab.filter(c => c.branchId === b.id).length, short: data.shortages.filter(x => x.branchId === b.id).length, rev: sumAmt(data.payments.filter(p => p.branchId === b.id && inP(p.date))), dues: sumAmt(unpaid.filter(d => d.branchId === b.id)) };
+            }) : [];
+
+            const Delta = ({ v }) => v === null ? null : <span className={`text-[10px] font-black px-1.5 py-0.5 rounded-md ${v >= 0 ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`} dir="ltr">{v >= 0 ? '▲' : '▼'} {Math.abs(v)}%</span>;
+            const Kpi = ({ label, value, sub, tab, delta, tone }) => (
+                <button type="button" onClick={() => tab && onNav(tab)} className="text-right bg-white p-4 rounded-[20px] border border-gray-100 shadow-sm hover:-translate-y-0.5 hover:shadow-md transition-all">
+                    <p className="text-[10px] font-black text-gray-400 mb-1.5">{label}</p>
+                    <div className="flex items-center gap-2 flex-wrap"><p className={`text-2xl font-black tracking-tight ${tone || 'text-gray-900'}`}>{value}</p><Delta v={delta ?? null} /></div>
+                    {sub && <p className="text-[10px] font-bold text-gray-500 mt-1">{sub}</p>}
+                </button>);
+            const attention = [
+                tmrUnconfirmed.length && { t: `${tmrUnconfirmed.length} حجز بكرة لسه مش مؤكد — ابعتي تذكير`, tab: 'appointments', c: 'bg-indigo-50 text-indigo-700' },
+                followDue.length && { t: `${followDue.length} مريض محتاج متابعة`, tab: 'patients', c: 'bg-amber-50 text-amber-700' },
+                labLate.length && { t: `${labLate.length} حالة معمل اتأخرت — اطلبيها`, tab: 'labs', c: 'bg-orange-50 text-orange-700' },
+                isAdm && overdue.length && { t: `${overdue.length} فاتورة عدّى ميعاد سدادها (${fmtN(sumAmt(overdue))} ج)`, tab: 'dues', c: 'bg-red-50 text-red-600' },
+                data.shortages.length && { t: `${data.shortages.length} صنف ناقص`, tab: 'shortages', c: 'bg-gray-100 text-gray-700' }
+            ].filter(Boolean);
+            const dateTxt = new Intl.DateTimeFormat('ar-EG', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date());
+            const scope = selectedBranch === 'all' ? 'كل الفروع' : 'فرع ' + ((data.branches.find(b => b.id === selectedBranch) || {}).name || '');
+
+            return (
+                <div className="space-y-4 animate-fade-in">
+                    <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3">
+                        <div><h3 className="text-xl font-black text-gray-900">لوحة التحكم</h3><p className="text-xs font-bold text-gray-400 mt-0.5">{dateTxt} • {scope}</p></div>
+                        <div className="flex bg-gray-100 p-1 rounded-xl">{['today', 'week', 'month'].map(k => <button key={k} type="button" onClick={() => setPeriod(k)} className={`flex-1 sm:flex-none px-4 py-1.5 text-xs font-bold rounded-lg ${period === k ? 'bg-white shadow text-gold-600' : 'text-gray-500'}`}>{{ today: 'النهاردة', week: 'الأسبوع', month: 'الشهر' }[k]}</button>)}</div>
+                    </div>
+
+                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                        <Kpi label={'الحجوزات — ' + PER.l} value={fmtN(pApps.length)} delta={appsDelta} sub={`${online} أونلاين • ${canceled} كنسل`} tab="appointments" />
+                        <Kpi label="نسبة الحضور" value={attendRate === null ? '—' : attendRate + '%'} sub={`${attended} حضروا`} tab="appointments" tone={attendRate !== null && attendRate < 70 ? 'text-red-600' : 'text-gray-900'} />
+                        <Kpi label="حجوزات النهاردة" value={fmtN(todayApps.length)} sub={`${todayApps.filter(a => a.status === 'arrived' || a.status === 'done').length} حضروا لحد دلوقتي`} tab="appointments" />
+                        {isSuper ? <Kpi label={'الإيراد — ' + PER.l} value={fmtN(rev) + ' ج'} delta={revDelta} sub={revPrev ? 'الفترة اللي قبلها: ' + fmtN(revPrev) + ' ج' : ''} tab="finance" />
+                            : <Kpi label="متابعات مستحقة" value={fmtN(followDue.length)} sub="مرضى محتاجين اتصال" tab="patients" tone={followDue.length ? 'text-amber-600' : 'text-gray-900'} />}
+                        <Kpi label="حالات عند المعمل" value={fmtN(atLab.length)} sub={labLate.length ? labLate.length + ' متأخرة' : 'مفيش متأخر'} tab="labs" tone={labLate.length ? 'text-orange-600' : 'text-gray-900'} />
+                        <Kpi label="النواقص" value={fmtN(data.shortages.length)} sub="أصناف مطلوبة" tab="shortages" />
+                        {isAdm && <Kpi label="مستحقات غير مسددة" value={fmtN(sumAmt(unpaid)) + ' ج'} sub={overdue.length ? overdue.length + ' متأخرة' : unpaid.length + ' فاتورة'} tab="dues" tone={overdue.length ? 'text-red-600' : 'text-gray-900'} />}
+                        <Kpi label="سجل المرضى" value={fmtN(data.patients.length)} sub={followDue.length + ' محتاج متابعة'} tab="patients" />
+                    </div>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                        <div className="lg:col-span-2"><Panel title="الحجوزات — آخر 14 يوم" sub="من غير الملغي • العمود الغامق = النهاردة"><MiniBars points={bookingPts} unit=" حجز" /></Panel></div>
+                        <Panel title="محتاج انتباهك" sub={attention.length ? '' : 'كله تمام'}>
+                            {attention.length ? <div className="space-y-2">{attention.map((x, i) => <button key={i} type="button" onClick={() => onNav(x.tab)} className={`w-full text-right text-xs font-black p-3 rounded-xl ${x.c} hover:opacity-80`}>{x.t} ←</button>)}</div>
+                                : <p className="text-xs text-emerald-600 font-black text-center py-8">✓ مفيش حاجة متأخرة</p>}
+                        </Panel>
+                    </div>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                        <div className="lg:col-span-2"><Panel title="جدول النهاردة" sub={todayApps.length + ' حجز'} action={<button type="button" onClick={() => onNav('appointments')} className="text-[11px] font-black text-gold-600">كل المواعيد ←</button>}>
+                            {todayApps.length === 0 ? <p className="text-xs text-gray-400 font-bold py-6 text-center">مفيش حجوزات النهاردة</p> : (
+                                <div className="divide-y divide-gray-50 max-h-80 overflow-y-auto custom-scrollbar -mx-1">{todayApps.map(a => { const st = (!a.status || a.status === 'booked') ? 'unconfirmed' : a.status; const S = APP_STATUS[st] || APP_STATUS.unconfirmed; return (
+                                    <div key={a.id} className="flex items-center gap-3 py-2.5 px-1">
+                                        <span className="text-[11px] font-black text-gold-700 bg-gold-50 rounded-lg px-2 py-1 w-14 text-center shrink-0" dir="ltr">{a.time || '--'}</span>
+                                        <div className="min-w-0 flex-1"><p className="text-xs font-black text-gray-800 truncate">{a.patientName}</p><p className="text-[10px] text-gray-400 font-bold truncate">{[a.service, a.doctorName && 'د. ' + a.doctorName, selectedBranch === 'all' && (data.branches.find(b => b.id === a.branchId) || {}).name].filter(Boolean).join(' • ')}</p></div>
+                                        {a.source === 'online' && <span className="text-[9px] font-black text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded shrink-0">أونلاين</span>}
+                                        <span className={`text-[9px] font-black px-2 py-1 rounded-lg shrink-0 ${S.c}`}>{S.l}</span>
+                                    </div>); })}</div>)}
+                        </Panel></div>
+                        <Panel title="أكتر الخدمات طلباً" sub={PER.l}><RankBars rows={topServices} empty="مفيش خدمات مسجلة في الفترة دي" /></Panel>
+                    </div>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                        {isSuper && <div className="lg:col-span-2"><Panel title="الإيراد — آخر 6 شهور" sub="من التوريدات المسجلة"><MiniBars points={revPts} unit=" ج" /></Panel></div>}
+                        <div className={isSuper ? '' : 'lg:col-span-3'}><Panel title="الحجوزات حسب الدكتور" sub={PER.l}><RankBars rows={byDoctor} unit=" حجز" empty="مفيش حجوزات مرتبطة بدكاترة" /></Panel></div>
+                    </div>
+
+                    {branchRows.length > 0 && <Panel title="مقارنة الفروع" sub={PER.l}>
+                        <div className="overflow-x-auto -mx-1"><table className="w-full text-right text-xs min-w-[520px]">
+                            <thead className="text-[10px] text-gray-400"><tr className="border-b border-gray-100"><th className="p-2 font-black">الفرع</th><th className="p-2 font-black text-center">حجوزات</th><th className="p-2 font-black text-center">حضور</th><th className="p-2 font-black text-center">عند المعمل</th><th className="p-2 font-black text-center">نواقص</th>{isSuper && <th className="p-2 font-black text-center">إيراد</th>}<th className="p-2 font-black text-center">مستحقات</th></tr></thead>
+                            <tbody className="divide-y divide-gray-50">{branchRows.map(r => <tr key={r.b.id} className="hover:bg-gray-50">
+                                <td className="p-2 font-black text-gray-800">{r.b.name}</td><td className="p-2 text-center font-bold">{fmtN(r.apps)}</td>
+                                <td className={`p-2 text-center font-bold ${r.att !== null && r.att < 70 ? 'text-red-600' : ''}`}>{r.att === null ? '—' : r.att + '%'}</td>
+                                <td className="p-2 text-center font-bold">{r.lab}</td><td className="p-2 text-center font-bold">{r.short}</td>
+                                {isSuper && <td className="p-2 text-center font-black text-gray-900">{fmtN(r.rev)} ج</td>}<td className="p-2 text-center font-bold">{fmtN(r.dues)} ج</td></tr>)}</tbody>
+                        </table></div>
+                    </Panel>}
                 </div>
             );
         }
@@ -1354,6 +1530,7 @@
                             <div className="space-y-1 bg-gray-50 p-3 rounded-xl border border-gray-100 text-xs font-bold text-gray-700">
                                 <p>📍 {p.address || 'غير مسجل'}</p>
                                 <div className="flex flex-wrap gap-1">{(p.services && p.services.length ? p.services : [p.service || 'غير محدد']).map(x => <span key={x} className="text-[10px] font-black text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">{x}</span>)}</div>
+                                {p.lastEvent && <p className="text-[10px] font-black text-red-600 bg-red-50 rounded px-1.5 py-0.5 inline-block">⚠️ {p.lastEvent}</p>}
                                 {p.doctorId && <p className="text-[10px] text-gray-500">👨‍⚕️ د. {staff.find(x => x.id === p.doctorId)?.name || ''}</p>}
                             </div>
                             {p.followUpDate && (
@@ -1386,44 +1563,50 @@
         }
 
         function MasterCodeView({ currentUser, showToast }) {
-            const [oldC, setOldC] = useState('');
-            const [newC, setNewC] = useState('');
+            const [oldP, setOldP] = useState('');
+            const [newU, setNewU] = useState(currentUser.username || '');
+            const [newP, setNewP] = useState('');
             const [conf, setConf] = useState('');
             const [busy, setBusy] = useState(false);
-            const inp = "w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500 text-center tracking-[0.5em]";
+            const inp = "w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-sm focus:border-gold-500";
             const save = async (e) => {
                 e.preventDefault();
                 if (busy) return;
-                const o = oldC.trim(), n = newC.trim();
-                if (!/^\d{4}$/.test(n)) { showToast('الكود الجديد لازم يكون 4 أرقام'); return; }
-                if (n !== conf.trim()) { showToast('تأكيد الكود مش مطابق'); return; }
-                if (n === o) { showToast('الكود الجديد هو نفسه القديم'); return; }
+                const u = normUser(newU), np = newP || oldP;
+                if (!validUser(u)) { showToast('اسم المستخدم من 3 لـ 40 حرف ومن غير مسافات'); return; }
+                if (newP && !validPass(newP)) { showToast('كلمة السر الجديدة 4 حروف على الأقل'); return; }
+                if (newP && newP !== conf) { showToast('تأكيد كلمة السر مش مطابق'); return; }
+                if (u === normUser(currentUser.username) && !newP) { showToast('مفيش تغيير'); return; }
                 setBusy(true);
                 try {
-                    // التأكد من الكود الحالي من غير ما نخزنه في أي مكان
+                    // التأكد من كلمة السر الحالية
                     let okOld = false;
-                    try { const c = await authCreds(o); const sa = getSecAuth(); const r = await sa.signInWithEmailAndPassword(c.email, c.password); okOld = r.user.uid === currentUser.authUid; await sa.signOut(); } catch (x) {}
-                    if (!okOld) { showToast('الكود الحالي غلط'); setBusy(false); return; }
+                    try { const c = await authCreds(currentUser.username, oldP); const sa = getSecAuth(); const r = await sa.signInWithEmailAndPassword(c.email, c.password); okOld = r.user.uid === currentUser.authUid; await sa.signOut(); } catch (x) {}
+                    if (!okOld) { showToast('كلمة السر الحالية غلط'); setBusy(false); return; }
                     const { name, role, branchId, branchIds, jobTitle } = currentUser;
-                    await saveStaff(currentUser.id, { name, role, branchId: branchId || 'all', branchIds: branchIds || [], jobTitle: jobTitle || 'سوبر أدمن', code: n }, { ...currentUser, code: o });
-                    alert('تم تغيير الكود. هتدخلي بالكود الجديد من الشاشة الجاية.');
-                    auth.signOut().catch(() => {}).finally(() => window.location.reload());
+                    await saveStaff(currentUser.id, { name, role, branchId: branchId || 'all', branchIds: branchIds || [], jobTitle: jobTitle || 'سوبر أدمن', username: u, password: np }, { ...currentUser, password: oldP });
+                    const c = await authCreds(u, np);
+                    await auth.signInWithEmailAndPassword(c.email, c.password);
+                    alert('تم الحفظ. من دلوقتي ادخلي باسم المستخدم وكلمة السر الجداد.');
+                    window.location.reload();
                 } catch (err) {
-                    showToast('مشكلة في تغيير الكود: ' + err.message);
+                    showToast('مشكلة في الحفظ: ' + err.message);
                     setBusy(false);
                 }
             };
             return (
                 <form onSubmit={save} className="bg-white rounded-[20px] border border-gray-100 shadow-sm p-5 space-y-3 max-w-sm">
-                    <h4 className="font-black text-gray-800 text-sm">تغيير كود السوبر أدمن</h4>
-                    <p className="text-[10px] text-gray-400 font-bold">الصفحة دي بتظهر للسوبر أدمن بس. بعد التغيير هتدخلي بالكود الجديد.</p>
-                    <div className="space-y-1"><label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الكود الحالي</label>
-                        <input type="password" inputMode="numeric" maxLength={4} value={oldC} onChange={e => setOldC(e.target.value.replace(/\D/g, ''))} className={inp} required /></div>
-                    <div className="space-y-1"><label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الكود الجديد (4 أرقام)</label>
-                        <input type="password" inputMode="numeric" maxLength={4} value={newC} onChange={e => setNewC(e.target.value.replace(/\D/g, ''))} className={inp} required /></div>
-                    <div className="space-y-1"><label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">تأكيد الكود الجديد</label>
-                        <input type="password" inputMode="numeric" maxLength={4} value={conf} onChange={e => setConf(e.target.value.replace(/\D/g, ''))} className={inp} required /></div>
-                    <button disabled={busy} type="submit" className="w-full bg-gold-500 text-white py-3 rounded-xl font-black text-sm shadow-md hover:bg-gold-600 disabled:opacity-50">{busy ? 'جاري الحفظ...' : 'حفظ الكود الجديد'}</button>
+                    <h4 className="font-black text-gray-800 text-sm">بيانات دخولي</h4>
+                    <p className="text-[10px] text-gray-400 font-bold">اسم المستخدم الحالي: <span dir="ltr" className="font-mono text-gray-700">{currentUser.username}</span></p>
+                    <div className="space-y-1"><label className="text-[9px] font-black text-gray-500 block">كلمة السر الحالية *</label>
+                        <input type="password" dir="ltr" value={oldP} onChange={e => setOldP(e.target.value)} className={inp} required /></div>
+                    <div className="space-y-1"><label className="text-[9px] font-black text-gray-500 block">اسم المستخدم الجديد</label>
+                        <input dir="ltr" autoCapitalize="none" value={newU} onChange={e => setNewU(e.target.value)} className={inp} /></div>
+                    <div className="space-y-1"><label className="text-[9px] font-black text-gray-500 block">كلمة السر الجديدة (سيبيها فاضية لو مش هتغيّريها)</label>
+                        <input type="password" dir="ltr" value={newP} onChange={e => setNewP(e.target.value)} className={inp} /></div>
+                    {newP && <div className="space-y-1"><label className="text-[9px] font-black text-gray-500 block">تأكيد كلمة السر الجديدة</label>
+                        <input type="password" dir="ltr" value={conf} onChange={e => setConf(e.target.value)} className={inp} /></div>}
+                    <button disabled={busy} type="submit" className="w-full bg-gold-500 text-white py-3 rounded-xl font-black text-sm shadow-md hover:bg-gold-600 disabled:opacity-50">{busy ? 'جاري الحفظ...' : 'حفظ'}</button>
                 </form>
             );
         }
@@ -1532,7 +1715,7 @@
         function StatusSelect({ a, showToast }) {
             const cur = (!a.status || a.status === 'booked') ? 'unconfirmed' : a.status;
             return (
-                <select value={cur} onChange={e => db.collection('appointments').doc(a.id).update({ status: e.target.value }).catch(err => showToast("مشكلة في تغيير الحالة: " + err.message))}
+                <select value={cur} onChange={e => db.collection('appointments').doc(a.id).update({ status: e.target.value, statusChangedAt: new Date().toISOString() }).catch(err => showToast("مشكلة في تغيير الحالة: " + err.message))}
                     className={`text-[9px] font-black rounded-lg px-1.5 py-1.5 outline-none cursor-pointer ${APP_STATUS[cur].c}`}>
                     {Object.entries(APP_STATUS).map(([k, v]) => <option key={k} value={k}>{v.l}</option>)}
                 </select>
@@ -1645,6 +1828,12 @@
         }
 
         // --- الموظفين + الأطباء ---
+        function SecretCell({ value }) {
+            const [show, setShow] = useState(false);
+            if (!value) return <span className="text-gray-300">—</span>;
+            return <button type="button" onClick={() => setShow(!show)} className="font-mono font-bold text-gray-700 hover:text-gold-600">{show ? value : '••••••'}</button>;
+        }
+
         function StaffView({ staff, branches, onConfirm, onAdd, onEdit, showToast }) {
             const [tab, setTab] = useState('staff');
             const list = staff.filter(s => tab === 'doctors' ? s.role === 'doctor' : (s.role !== 'doctor' && s.role !== 'superadmin'));
@@ -1658,16 +1847,17 @@
                         <button type="button" onClick={() => setTab('staff')} className={`flex-1 px-4 py-1.5 text-xs font-bold rounded-lg ${tab === 'staff' ? 'bg-white shadow text-gold-600' : 'text-gray-500'}`}>سكرتارية / تمريض</button>
                         <button type="button" onClick={() => setTab('doctors')} className={`flex-1 px-4 py-1.5 text-xs font-bold rounded-lg ${tab === 'doctors' ? 'bg-white shadow text-gold-600' : 'text-gray-500'}`}>الأطباء</button>
                     </div>
-                    {tab === 'doctors' && <p className="text-[10px] text-gray-400 font-bold">الطبيب يدخل بكوده ويشوف حجوزاته فقط، ويقدر يغيّر حالة الحجز. ممكن تختاري له أكتر من فرع بكود واحد.</p>}
+                    {tab === 'doctors' && <p className="text-[10px] text-gray-400 font-bold">الطبيب يدخل باسم المستخدم وكلمة السر ويشوف حجوزاته وحالاته بس، ويقدر يغيّر حالة الحجز. ممكن تختاري له أكتر من فرع بنفس الحساب.</p>}
                     <div className="bg-white rounded-[20px] border border-gray-100 overflow-hidden shadow-sm w-full overflow-x-auto">
-                        <table className="w-full text-right text-[10px] min-w-[380px]">
-                            <thead className="bg-gray-50 text-gray-500 border-b"><tr><th className="p-2">الاسم</th><th className="p-2">الوظيفة</th><th className="p-2 text-center">الكود</th><th className="p-2">الفرع</th><th className="p-2 text-center">أوامر</th></tr></thead>
+                        <table className="w-full text-right text-[10px] min-w-[480px]">
+                            <thead className="bg-gray-50 text-gray-500 border-b"><tr><th className="p-2">الاسم</th><th className="p-2">الوظيفة</th><th className="p-2 text-center">اسم المستخدم</th><th className="p-2 text-center">كلمة السر</th><th className="p-2">الفرع</th><th className="p-2 text-center">أوامر</th></tr></thead>
                             <tbody className="divide-y divide-gray-100">{list.map(s => (
                                 <tr key={s.id} className="hover:bg-gray-50/50">
                                     <td className="p-2 font-bold text-gray-800">{s.name}</td>
                                     <td className="p-2 text-gray-500">{s.jobTitle || (s.role === 'admin' ? 'مدير' : 'سكرتارية')}</td>
-                                    <td className="p-2 text-center font-mono font-black text-gold-600 text-xs tracking-widest">{s.code}</td>
-                                    <td className="p-2 text-gray-500">{s.role === 'doctor' ? doctorBranchIds(s, branches).map(id => branches.find(b => b.id === id)?.name).filter(Boolean).join('، ') : (s.branchId === 'all' ? 'كل الفروع' : branches.find(b => b.id === s.branchId)?.name)}</td>
+                                    <td className="p-2 text-center font-mono font-black text-gold-600 text-xs" dir="ltr">{s.username || '—'}</td>
+                                    <td className="p-2 text-center font-mono text-xs" dir="ltr"><SecretCell value={s.password} /></td>
+                                    <td className="p-2 text-gray-500">{s.role === 'doctor' ? doctorBranchIds(s, branches).map(id => <div key={id}><b>{branches.find(b => b.id === id)?.name}</b>: <span className="text-[9px]">{daysText((s.schedule || {})[id])}</span></div>) : (s.branchId === 'all' ? 'كل الفروع' : branches.find(b => b.id === s.branchId)?.name)}</td>
                                     <td className="p-2 flex justify-center gap-1">
                                         <button type="button" onClick={() => onEdit(s)} className="p-1 text-gold-500 bg-white border border-gray-200 rounded hover:bg-gold-500 hover:text-white transition-colors"><IconEdit/></button>
                                         <button type="button" onClick={() => onConfirm({msg:'حذف الموظف نهائياً؟', onConfirm:()=>{
@@ -1900,6 +2090,10 @@
         function DataModal({ modal, branches, user, selectedBranch, onClose, showToast, staff = [], costs = {}, labNames = [], labPhones = {}, lastCosts = {} }) {
             const [pBranch, setPBranch] = useState(modal.data?.branchId || (user.role === 'employee' ? user.branchId : (selectedBranch !== 'all' ? selectedBranch : (branches[0]?.id || ''))));
             const pDocs = staff.filter(x => x.role === 'doctor' && doctorBranchIds(x, branches).includes(pBranch));
+            const [appDate, setAppDate] = useState(modal.data?.date || localDay());
+            const [docBr, setDocBr] = useState(() => modal.type === 'staff' && modal.data?.role === 'doctor' ? doctorBranchIds(modal.data, branches) : []);
+            const [docSched, setDocSched] = useState(() => (modal.type === 'staff' && modal.data?.schedule) || {});
+            const toggleDay = (bid, day) => setDocSched(s0 => { const cur = s0[bid] || []; return { ...s0, [bid]: cur.includes(day) ? cur.filter(x => x !== day) : [...cur, day].sort() }; });
             const [appBranch, setAppBranch] = useState(modal.data?.branchId || (user.role === 'employee' ? user.branchId : (selectedBranch !== 'all' ? selectedBranch : (branches[0]?.id || ''))));
             const [jobTitle, setJobTitle] = useState(modal.data?.jobTitle || modal.data?.kind || (modal.data?.role === 'doctor' ? 'طبيب' : 'سكرتارية'));
             const save = (e) => {
@@ -1909,15 +2103,16 @@
                 const saveCost = (id) => { if (modal.type === 'lab' && costVal !== null && costVal !== '') db.collection('lab_costs').doc(id).set({ amount: Number(costVal) }).catch(err => showToast("مشكلة في حفظ التكلفة: " + err.message)); };
                 
                 if(modal.type==='app') {
-                    col='appointments'; const doc = staff.find(s => s.id === f.docId.value); d={patientName:f.pName.value, phone:f.phone.value, date:f.dt.value, time:f.tm.value, service:f.service.value, branchId:f.bId.value, recordedBy:user.name, doctorId: doc ? doc.id : '', doctorName: doc ? doc.name : ''}; if(modal.mode!=='edit') d.status='unconfirmed';
+                    col='appointments'; const doc = staff.find(s => s.id === f.docId.value);
+                    if (doc && !doctorWorks(doc, f.bId.value, f.dt.value)) { showToast('د. ' + doc.name + ' مش متاح يوم ' + DAY_NAMES[dowOf(f.dt.value)] + ' (بييجي: ' + daysText((doc.schedule || {})[f.bId.value]) + ')'); return; } d={patientName:f.pName.value, phone:f.phone.value, date:f.dt.value, time:f.tm.value, service:f.service.value, branchId:f.bId.value, recordedBy:user.name, doctorId: doc ? doc.id : '', doctorName: doc ? doc.name : ''}; if(modal.mode!=='edit') d.status='unconfirmed';
                 } else if(modal.type==='staff') {
                     col='staff_members';
                     if (f.jobTitle.value === 'طبيب') {
-                        const ids = Array.from(f.querySelectorAll('input[name="docBranch"]:checked')).map(x => x.value);
+                        const ids = branches.map(b => b.id).filter(id => docBr.includes(id));
                         if (ids.length === 0) { showToast("اختاري فرع واحد على الأقل للطبيب"); return; }
-                        d={name:f.name.value, code:f.code.value, branchId:ids[0], branchIds:ids, jobTitle:'طبيب', role:'doctor'};
+                        d={name:f.name.value, username:f.username.value, password:f.password.value, branchId:ids[0], branchIds:ids, jobTitle:'طبيب', role:'doctor', schedule:Object.fromEntries(ids.map(id => [id, docSched[id] || []]))};
                     } else {
-                        d={name:f.name.value, code:f.code.value, branchId:f.bId.value, branchIds:[], jobTitle:f.jobTitle.value, role: f.bId.value==='all'?'admin':'employee'};
+                        d={name:f.name.value, username:f.username.value, password:f.password.value, branchId:f.bId.value, branchIds:[], jobTitle:f.jobTitle.value, role: f.bId.value==='all'?'admin':'employee'};
                     }
                 } else if(modal.type==='patient') {
                     col='patients'; d={fileNo:f.fileNo.value, name:f.name.value, phone:f.phone.value, address:f.address.value, services:Array.from(f.querySelectorAll('input[name="svc"]:checked')).map(x => x.value), doctorId:f.docId.value || '', branchId:(user.role==='admin' || user.role==='superadmin')?f.bId.value:user.branchId, recordedBy:user.name};
@@ -1986,7 +2181,7 @@
                                         <Input name="pName" label="اسم المريض" defaultValue={modal.data?.patientName} required />
                                         <Input name="phone" label="رقم الموبايل" defaultValue={modal.data?.phone} type="tel" required />
                                         <div className="grid grid-cols-2 gap-2">
-                                            <Input name="dt" label="التاريخ" type="date" defaultValue={modal.data?.date || new Date().toISOString().split('T')[0]} required />
+                                            <Input name="dt" label="التاريخ" type="date" value={appDate} onChange={e => setAppDate(e.target.value)} required />
                                             <Input name="tm" label="الوقت" type="time" defaultValue={modal.data?.time} required />
                                         </div>
                                         <Input name="service" label="الخدمة (اختياري)" defaultValue={modal.data?.service} />
@@ -1995,12 +2190,14 @@
                                             {(() => {
                                                 const docs = staff.filter(x => x.role === 'doctor' && doctorBranchIds(x, branches).includes(appBranch));
                                                 const dv = docs.some(x => x.id === modal.data?.doctorId) ? modal.data.doctorId : '';
-                                                return (
+                                                const off = docs.filter(x => !doctorWorks(x, appBranch, appDate));
+                                                return (<>
                                                     <select key={appBranch} name="docId" required defaultValue={dv} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
                                                         <option value="" disabled>{docs.length === 0 ? 'لا يوجد أطباء في هذا الفرع' : 'اختر الطبيب...'}</option>
-                                                        {docs.map(x => <option key={x.id} value={x.id}>د. {x.name}</option>)}
+                                                        {docs.map(x => { const ok = doctorWorks(x, appBranch, appDate); return <option key={x.id} value={x.id} disabled={!ok}>د. {x.name}{ok ? '' : ' — مش متاح يوم ' + DAY_NAMES[dowOf(appDate)]}</option>; })}
                                                     </select>
-                                                );
+                                                    {off.length > 0 && <p className="text-[10px] font-bold text-red-500">{off.map(x => 'د. ' + x.name).join('، ')} مش متاح يوم {DAY_NAMES[dowOf(appDate)]}</p>}
+                                                </>);
                                             })()}
                                         </div>
                                         <div className="space-y-1">
@@ -2152,7 +2349,10 @@
                                 {modal.type==='staff' && (
                                     <>
                                         <Input name="name" label="اسم الموظف" defaultValue={modal.data?.name} required />
-                                        <Input name="code" label="كود الدخول (4 أرقام)" defaultValue={modal.data?.code} type="tel" maxLength="4" required />
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <Input name="username" label="اسم المستخدم" defaultValue={modal.data?.username} dir="ltr" autoCapitalize="none" autoComplete="off" required />
+                                            <Input name="password" label="كلمة السر (4+ حروف)" defaultValue={modal.data?.password} dir="ltr" autoComplete="new-password" required />
+                                        </div>
                                         <div className="space-y-1">
                                             <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">الوظيفة</label>
                                             <select name="jobTitle" value={jobTitle} onChange={(e) => setJobTitle(e.target.value)} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500">
@@ -2163,14 +2363,18 @@
                                         </div>
                                         {jobTitle === 'طبيب' ? (
                                             <div className="space-y-1">
-                                                <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">فروع الطبيب (اختاري فرع أو أكتر)</label>
-                                                <div className="grid grid-cols-2 gap-2">
-                                                    {branches.map(b => (
-                                                        <label key={b.id} className="flex items-center gap-2 p-2.5 bg-gray-50 border border-gray-100 rounded-xl text-xs font-bold cursor-pointer">
-                                                            <input type="checkbox" name="docBranch" value={b.id} defaultChecked={modal.data?.role === 'doctor' && doctorBranchIds(modal.data, branches).includes(b.id)} className="w-4 h-4 accent-yellow-600" />
-                                                            {b.name}
-                                                        </label>
-                                                    ))}
+                                                <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">فروع الطبيب وأيام شغله في كل فرع</label>
+                                                <p className="text-[10px] text-gray-400 font-bold">الأيام دي مش بتظهر للمرضى. لو المريض اختار يوم مش من أيامه، بيظهرله إن الدكتور مش متاح. لو مختارتيش أيام = متاح كل الأيام.</p>
+                                                <div className="space-y-2">
+                                                    {branches.map(b => { const on = docBr.includes(b.id); return (
+                                                        <div key={b.id} className={`p-2.5 border rounded-xl ${on ? 'bg-gold-50/40 border-gold-200' : 'bg-gray-50 border-gray-100'}`}>
+                                                            <label className="flex items-center gap-2 text-xs font-black cursor-pointer">
+                                                                <input type="checkbox" checked={on} onChange={() => setDocBr(v => on ? v.filter(x => x !== b.id) : [...v, b.id])} className="w-4 h-4 accent-yellow-600" />
+                                                                {b.name}
+                                                            </label>
+                                                            {on && <div className="flex flex-wrap gap-1.5 mt-2">{DAY_ORDER.map(dy => { const sel = (docSched[b.id] || []).includes(dy); return (
+                                                                <button key={dy} type="button" onClick={() => toggleDay(b.id, dy)} className={`px-2.5 py-1.5 rounded-lg text-[10px] font-black border ${sel ? 'bg-gold-500 text-white border-gold-500' : 'bg-white text-gray-600 border-gray-200'}`}>{DAY_NAMES[dy]}</button>); })}</div>}
+                                                        </div>); })}
                                                 </div>
                                             </div>
                                         ) : (
