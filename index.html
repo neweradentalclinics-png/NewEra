@@ -194,14 +194,14 @@
         // أنواع الإشعارات، وكل نوع بيروح للإدارة (الشات الرئيسي) و/أو لسكرتارية الفرع حسب الإعدادات
         const TG_KINDS = [
             ['booking', 'حجز جديد من السيستم'], ['online', 'حجز أونلاين جديد (الموقع / صفحة الحجز)'], ['cancel', 'كنسل أو تأجيل'], ['reschedule', 'تعديل ميعاد حجز'],
-            ['follow', 'موعد متابعة مريض'], ['lab', 'تذكير حالة معمل'], ['shortage', 'نقص جديد'], ['due', 'فاتورة / مستحق جديد'], ['digest', 'ملخص الصبح اليومي (أرقام)'], ['schedule', 'جدول مواعيد النهاردة']
+            ['follow', 'موعد متابعة مريض'], ['lab', 'تذكير حالة معمل'], ['shortage', 'نقص جديد'], ['due', 'فاتورة / مستحق جديد'], ['digest', 'ملخص الصبح اليومي (أرقام)'], ['schedule', 'جدول مواعيد النهاردة'], ['consult', 'استشارة أونلاين (جديدة + الرد عليها)']
         ];
         const ALL_KINDS = TG_KINDS.map(k => k[0]);
-        const TG_DEFAULT_ROUTES = { main: ['booking', 'online', 'cancel', 'follow', 'lab', 'shortage', 'due', 'schedule', 'reschedule'], branch: ['booking', 'online', 'cancel', 'follow', 'lab', 'shortage', 'digest', 'reschedule'] };
+        const TG_DEFAULT_ROUTES = { main: ['booking', 'online', 'cancel', 'follow', 'lab', 'shortage', 'due', 'schedule', 'reschedule', 'consult'], branch: ['booking', 'online', 'cancel', 'follow', 'lab', 'shortage', 'digest', 'reschedule'] };
         // الافتراضي لكل شخص جديد في قايمة الأشخاص
-        const PERSON_DEFAULT = { doctor: ['booking', 'online', 'cancel', 'reschedule', 'schedule'], admin: ['booking', 'online', 'cancel', 'reschedule', 'follow', 'lab', 'shortage', 'due', 'schedule'] };
+        const PERSON_DEFAULT = { doctor: ['booking', 'online', 'cancel', 'reschedule', 'schedule'], admin: ['booking', 'online', 'cancel', 'reschedule', 'follow', 'lab', 'shortage', 'due', 'schedule', 'consult'] };
         // الدكتور: الحاجات دي بتوصله لو تخصه هو بس (حجوزاته / مرضاه). الباقي بيوصله لو في فروعه
-        const DOCTOR_OWN_KINDS = ['booking', 'online', 'cancel', 'reschedule', 'follow'];
+        const DOCTOR_OWN_KINDS = ['booking', 'online', 'cancel', 'reschedule', 'follow', 'consult'];
         // إشعارات جديدة بتتضاف للإعدادات المحفوظة قبلها بقيمتها الافتراضية
         const mergeRoutes = (x) => { if (!x.routes) return TG_DEFAULT_ROUTES; const known = x.routesKnown || ['booking', 'online', 'cancel', 'follow', 'lab', 'shortage', 'due', 'digest']; const r = {}; ['main', 'branch'].forEach(sd => { r[sd] = [...(x.routes[sd] || []), ...TG_DEFAULT_ROUTES[sd].filter(k => !known.includes(k))]; }); return r; };
         // الأشخاص (دكاترة / أدمنز / يدوي): { key: { chat, kinds, name?, manual? } } — key = رقم الموظف في السيستم، أو m_... لليدوي
@@ -215,6 +215,7 @@
         const TG = { token: '', main: '', branches: {}, people: {}, routes: TG_DEFAULT_ROUTES, off: [], quiet: {} };
         const tgOn = kind => !(TG.off || []).includes(kind) && !Object.entries(TPL_KIND).some(([k, v]) => v === kind && !tplOn(k));
         const tgQuiet = k => !!(((TPL._quiet || {})[k]) ?? (TG.quiet || {})[k]);
+        const tgPostId = (chat, text, extra) => fetch(`https://api.telegram.org/bot${TG.token}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chat, text, ...(extra || {}) }) }).then(r => r.json()).then(j => j.ok ? { chat: String(chat), mid: j.result.message_id } : null).catch(() => null);
         const tgPost = (chat, text) => fetch(`https://api.telegram.org/bot${TG.token}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chat, text }) });
         // مين من الأشخاص يستلم الإشعار ده
         const personGets = (key, per, kind, branchId, doctorIds) => {
@@ -372,6 +373,20 @@
             return when + ' ← هتتبعت لـ: ' + to + ' (' + br + ')' + skip;
         };
         const cmSendAll = (items) => queueSend(items.map(x => [x.r.chat, x.text]));
+        // ===== الاستشارات الأونلاين =====
+        // مين يستلم الاستشارة على تيليجرام: الدكاترة المختارين (لو ليهم شات) + الإدارة/الأدمنز حسب الصلاحيات
+        const consultChats = (c) => {
+            const chats = [], r = TG.routes || TG_DEFAULT_ROUTES;
+            if (!TG.token || !tgOn('consult')) return chats;
+            (c.targets || []).forEach(id => { const per = (TG.people || {})[id]; if (per && per.chat) chats.push(String(per.chat)); });
+            if (TG.main && (r.main || []).includes('consult')) chats.push(String(TG.main));
+            const bc = c.branchId && (TG.branches[c.branchId] || TG.branches[(LIVE.branches.find(b => b.id === c.branchId) || {}).name]);
+            if (bc && (r.branch || []).includes('consult')) chats.push(String(bc));
+            Object.entries(TG.people || {}).forEach(([k, per]) => { const st = (LIVE.staff || []).find(x => x.id === k); if (per && per.chat && (per.kinds || []).includes('consult') && (per.manual || (st && (st.role === 'admin' || st.role === 'superadmin')))) chats.push(String(per.chat)); });
+            return [...new Set(chats)];
+        };
+        const consultText = (c) => fillT('tgConsult', { code: c.id, patient: c.name, phone: c.phone || '', branch: (LIVE.branches.find(b => b.id === c.branchId) || {}).name || '—', topic: c.topic || '—', doctor: c.doctorName ? 'د. ' + c.doctorName : ((c.targets || []).length ? 'أي دكتور مناسب' : 'الإدارة'), question: c.question });
+        const sendConsult = async (c) => { const res = []; for (const ch of consultChats(c)) { const x = await tgPostId(ch, consultText(c)); if (x) res.push(x); await new Promise(r => setTimeout(r, 300)); } return res; };
         let _ac;
         const pushLocal = (text) => {
             try { _ac = _ac || new (window.AudioContext || window.webkitAudioContext)(); const o = _ac.createOscillator(), g = _ac.createGain(); o.connect(g); g.connect(_ac.destination); o.frequency.value = 880; g.gain.value = 0.15; o.start(); o.stop(_ac.currentTime + 0.25); } catch (e) {}
@@ -402,6 +417,9 @@
             tgDocSchedHead: '🗓️ مواعيدك النهاردة يا د. {doctor}\n{date} • {count} حجز',
             tgDocSchedLine: '• {time} — {patient} — {service} {online}',
             tgDocSchedEmpty: '🗓️ د. {doctor} — {date}\nمفيش حجوزات ليك النهاردة.',
+            tgConsult: '💬 استشارة أونلاين جديدة #{code}\nالمريض: {patient}\nالموبايل: {phone}\nالفرع: {branch}\nالموضوع: {topic}\nلـ: {doctor}\n\n❓ {question}\n\n↩️ اعمل Reply على الرسالة دي واكتب ردك، وهيوصل للمريض.',
+            tgConsultReply: '✅ اترد على الاستشارة #{code}\nالمريض: {patient}\nرد {by}:\n{reply}',
+            consultReply: 'أهلاً {name} 👋\nده رد {doctor} على استشارتك في نيو إيرا لطب الأسنان:\n\n{reply}\n\nلو حابب تحجز موعد ابعتلنا هنا. ألف سلامة 🌸',
             tgDigest: '☀️ صباح الخير — ملخص فرع {branch}\n{date}\n\n📅 حجوزات النهاردة: {today} (أونلاين: {online})\n❓ حجوزات بكرة لسه مش مؤكدة: {tomorrow}\n📞 متابعات مستحقة: {follow}\n⏰ حالات معمل محتاجة تتطلب: {lab}\n⚠️ نواقص مفتوحة: {short}'
         };
         const OLD_TG = {
@@ -412,7 +430,7 @@
         const TPL = { ...TPL_DEFAULT };
         // القوالب المحذوفة: الرسالة دي مش بتتبعت/زرارها مش بيظهر. _quiet = متبعتش الجدول لو فاضي
         const tplOn = k => !((TPL._deleted || []).includes(k));
-        const TPL_KIND = { tgApp: 'booking', tgOnline: 'online', tgCancel: 'cancel', tgResched: 'reschedule', tgFollow: 'follow', tgLab: 'lab', tgShortage: 'shortage', tgDue: 'due', tgDigest: 'digest' };
+        const TPL_KIND = { tgApp: 'booking', tgOnline: 'online', tgCancel: 'cancel', tgResched: 'reschedule', tgFollow: 'follow', tgLab: 'lab', tgShortage: 'shortage', tgDue: 'due', tgDigest: 'digest', tgConsult: 'consult' };
         const fillT = (k, v) => String(TPL[k] || '').replace(/\{(\w+)\}/g, (m, x) => v[x] ?? '');
         // بيانات حية لحساب الإجماليات في رسائل تيليجرام (بتتحدث من App)
         const LIVE = { appointments: [], dues: [], shortages: [], branches: [], staff: [] };
@@ -660,7 +678,7 @@
             const [selectedBranch, setSelectedBranch] = useState('all');
             const [isSidebarOpen, setIsSidebarOpen] = useState(false);
             
-            const [data, setData] = useState({ branches: [], staff: [], patients: [], appointments: [], payments: [], shortages: [], labCases: [], consumables: [], dues: [] });
+            const [data, setData] = useState({ branches: [], staff: [], patients: [], appointments: [], payments: [], shortages: [], labCases: [], consumables: [], dues: [], services: [], specialties: [], consults: [] });
             const [costs, setCosts] = useState({});
             const [staffCodes, setStaffCodes] = useState({});
             const [authChecked, setAuthChecked] = useState(false);
@@ -682,12 +700,16 @@
             const evVisible = (kind, x, u) => {
                 if (kind === 'dues' && u.role !== 'admin' && u.role !== 'superadmin') return false;
                 if (u.role === 'employee' && x.branchId !== u.branchId) return false;
+                if (kind === 'consults') return u.role === 'doctor' ? (x.targets || []).includes(u.id) : (u.role !== 'employee' || !x.branchId || x.branchId === u.branchId);
                 if (u.role === 'doctor' && !(kind === 'appointments' && x.doctorId === u.id)) return false;
                 return true;
             };
             const mkEv = (kind, id, x) => {
                 let text, category;
-                if (kind === 'appointments') {
+                if (kind === 'consults') {
+                    text = `💬 استشارة أونلاين جديدة: ${x.name}`;
+                    category = 'consults';
+                } else if (kind === 'appointments') {
                     text = `📅 حجز جديد: ${x.patientName} — ${x.date} ${x.time || ''}`;
                     category = 'bookings';
                 } else if (kind === 'dues') {
@@ -789,6 +811,17 @@
                     }).catch(() => {});
                 });
             }, [data.appointments, currentUser]);
+
+            // استشارة أونلاين جديدة → تيليجرام للدكتور/الدكاترة + الإدارة (مرة واحدة لكل استشارة)
+            useEffect(() => {
+                if (!currentUser || currentUser.role === 'doctor' || !firstSnap.current.consults || !TG.token) return;
+                const since = new Date(Date.now() - 2 * 864e5).toISOString();
+                data.consults.filter(c => c.status === 'new' && !c.tgSent && (c.createdAt || '') >= since).forEach(c => {
+                    const ref = db.collection('consults').doc(c.id);
+                    db.runTransaction(async tx => { const sn = await tx.get(ref); if (!sn.exists || sn.data().tgSent) return false; tx.update(ref, { tgSent: true }); return true; })
+                        .then(async won => { if (!won) return; const msgs = await sendConsult(c); if (msgs.length) await ref.update({ tgMsgs: firebase.firestore.FieldValue.arrayUnion(...msgs), tgKeys: firebase.firestore.FieldValue.arrayUnion(...msgs.map(m => m.chat + '_' + m.mid)) }); }).catch(() => {});
+                });
+            }, [data.consults, currentUser, tgReady]);
 
             // حجز أونلاين جديد → تيليجرام (مرة واحدة لكل حجز)
             useEffect(() => {
@@ -955,6 +988,11 @@
                     err => console.error(err)
                 );
                 
+                const sortO = a => a.sort((x, y) => (x.order ?? 999) - (y.order ?? 999) || (x.name || '').localeCompare(y.name || '', 'ar'));
+                const unsubSv = db.collection('services').onSnapshot(s => setData(d => ({ ...d, services: sortO(s.docs.map(x => ({ id: x.id, ...x.data() }))) })), err => console.error(err));
+                const unsubSp = db.collection('specialties').onSnapshot(s => setData(d => ({ ...d, specialties: sortO(s.docs.map(x => ({ id: x.id, ...x.data() }))) })), err => console.error(err));
+                const consQ = isDocU ? db.collection('consults').where('targets', 'array-contains', currentUser.id) : db.collection('consults').where('createdAt', '>=', new Date(Date.now() - 90 * 864e5).toISOString());
+                const unsubCo = consQ.onSnapshot(s => { notify('consults', s); setData(d => ({ ...d, consults: s.docs.map(x => ({ id: x.id, ...x.data() })).sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || '')) })); }, err => console.error(err));
                 const unsub7 = db.collection('lab_cases').onSnapshot(
                     s => setData(d => ({...d, labCases: s.docs.map(x => ({id: x.id, ...x.data()}))})),
                     err => console.error(err)
@@ -967,7 +1005,7 @@
                 const unsub10 = isDocU ? none() : db.collection('dues').onSnapshot(s => { notify('dues', s); setData(d => ({...d, dues: s.docs.map(x => ({id: x.id, ...x.data()}))})); }, err => console.error(err));
                 const unsub11 = db.collection('settings').doc('templates').onSnapshot(d => { if (d.exists) { const dd = { ...d.data() }; Object.keys(OLD_TG).forEach(k => { if (dd[k] === OLD_TG[k]) delete dd[k]; }); Object.assign(TPL, dd); setTplVer(v => v + 1); } }, err => console.error(err));
                 const unsub12 = db.collection('private_config').doc('telegram').onSnapshot(d => { const x = d.exists ? d.data() : {}; TG.token = x.token || ''; TG.main = x.main || ''; TG.branches = x.branches || {}; TG.people = mergePeople(x); TG.routes = mergeRoutes(x); TG.off = x.off || []; TG.quiet = x.quiet || {}; setTgReady(v => v + 1); }, err => console.error(err));
-                return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); unsub6(); unsub7(); unsub8(); unsub10(); unsub11(); unsub12(); };
+                return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); unsub6(); unsub7(); unsub8(); unsub10(); unsub11(); unsub12(); unsubSv(); unsubSp(); unsubCo(); };
             }, [isLoggedIn]);
 
             // تكاليف المعامل + أكواد الموظفين: بتتحمل للسوبر أدمن فقط
@@ -989,10 +1027,10 @@
                 const t = setTimeout(async () => {
                     try {
                         const want = {};
-                        data.staff.filter(x => x.role === 'doctor').forEach(x => { want[x.id] = { name: x.name || '', branchIds: doctorBranchIds(x, data.branches), days: x.schedule || {} }; });
+                        data.staff.filter(x => x.role === 'doctor').forEach(x => { want[x.id] = { name: x.name || '', branchIds: doctorBranchIds(x, data.branches), days: x.schedule || {}, specs: Array.isArray(x.specialties) ? x.specialties : [] }; });
                         const have = await db.collection('public_doctors').get();
                         const b = db.batch(); let n = 0;
-                        Object.entries(want).forEach(([id, v]) => { const h = have.docs.find(x => x.id === id); if (!h || h.data().name !== v.name || JSON.stringify(h.data().branchIds) !== JSON.stringify(v.branchIds) || JSON.stringify(h.data().days || {}) !== JSON.stringify(v.days)) { b.set(db.collection('public_doctors').doc(id), v); n++; } });
+                        Object.entries(want).forEach(([id, v]) => { const h = have.docs.find(x => x.id === id); if (!h || h.data().name !== v.name || JSON.stringify(h.data().branchIds) !== JSON.stringify(v.branchIds) || JSON.stringify(h.data().days || {}) !== JSON.stringify(v.days) || JSON.stringify(h.data().specs || []) !== JSON.stringify(v.specs)) { b.set(db.collection('public_doctors').doc(id), v); n++; } });
                         have.docs.forEach(x => { if (!want[x.id]) { b.delete(x.ref); n++; } });
                         if (n) await b.commit();
                     } catch (e) { console.error('public_doctors sync', e); }
@@ -1156,7 +1194,7 @@
                     {alerts.length > 0 && <div className="fixed top-3 left-3 right-3 z-[999999] flex flex-col gap-2 max-w-md mx-auto">{alerts.slice(-1).map(a => <button key={a.id} type="button" onClick={() => { pickNotif(a); setAlerts([]); }} className="bg-gray-900 text-white text-xs font-bold p-3 rounded-2xl shadow-2xl text-right animate-slide-up">{a.text}</button>)}</div>}
                     {toastMsg && <Toast msg={toastMsg} onClose={() => setToastMsg(null)} />}
                     {confirmAction && <ConfirmModal action={confirmAction} onClose={()=>setConfirmAction(null)} />}
-                    {modal && <DataModal modal={modal} staff={staffFull} costs={costs} labNames={[...new Set(filteredData.labCases.map(c => c.labName).filter(Boolean))]} lastCosts={Object.fromEntries(data.consumables.filter(c => c.unitCost).sort((a, b) => (a.date || '').localeCompare(b.date || '')).map(c => [(c.itemName || '').trim().toLowerCase(), c.unitCost]))} labPhones={Object.fromEntries(filteredData.labCases.filter(c => c.labPhone).map(c => [c.labName, c.labPhone]))} branches={data.branches} user={currentUser} selectedBranch={selectedBranch} onClose={()=>setModal(null)} showToast={setToastMsg} />}
+                    {modal && <DataModal modal={modal} staff={staffFull} specialties={data.specialties} costs={costs} labNames={[...new Set(filteredData.labCases.map(c => c.labName).filter(Boolean))]} lastCosts={Object.fromEntries(data.consumables.filter(c => c.unitCost).sort((a, b) => (a.date || '').localeCompare(b.date || '')).map(c => [(c.itemName || '').trim().toLowerCase(), c.unitCost]))} labPhones={Object.fromEntries(filteredData.labCases.filter(c => c.labPhone).map(c => [c.labName, c.labPhone]))} branches={data.branches} user={currentUser} selectedBranch={selectedBranch} onClose={()=>setModal(null)} showToast={setToastMsg} />}
 
                     {/* Overlay للطبقة الشفافة عشان تقفل القايمة الجانبية لما تدوس بره */}
                     {isSidebarOpen && (
@@ -1179,12 +1217,14 @@
                             <SidebarItem icon={<IconCalendar/>} label="المواعيد والتقويم" active={activeTab === 'appointments'} onClick={() => navigateTo('appointments')} />
                             {!isDoctor && <SidebarItem icon={<IconClipboard/>} label="النواقص" active={activeTab === 'shortages'} onClick={() => navigateTo('shortages')} />}
                             <SidebarItem icon={<IconFlask/>} label="المعامل" active={activeTab === 'labs'} onClick={() => navigateTo('labs')} />
+                            <SidebarItem icon={<IconUsers/>} label={'الاستشارات' + (data.consults.filter(c => !(c.replies || []).length).length ? ' (' + data.consults.filter(c => !(c.replies || []).length).length + ')' : '')} active={activeTab === 'consults'} onClick={() => navigateTo('consults')} />
                             {currentUser.role === 'employee' && <SidebarItem icon={<IconWallet/>} label="الفواتير" active={activeTab === 'dues'} onClick={() => navigateTo('dues')} />}
                             {currentUser.role === 'employee' && <SidebarItem icon={<IconWallet/>} label="توريد اليوم" active={activeTab === 'daily'} onClick={() => navigateTo('daily')} />}
                             {isAdminOrSuper && <div className="px-3 pt-4 pb-1 text-[9px] font-black text-gray-400 tracking-widest">الإدارة</div>}
                             {isAdminOrSuper && <SidebarItem icon={<IconWallet/>} label="المستهلكات الشهرية" active={activeTab === 'consumables'} onClick={() => navigateTo('consumables')} />}
                             {isAdminOrSuper && <SidebarItem icon={<IconWallet/>} label="الفواتير والمستحقات" active={activeTab === 'dues'} onClick={() => navigateTo('dues')} />}
                             {isSuperAdmin && <SidebarItem icon={<IconWallet/>} label="الماليات" active={activeTab === 'finance'} onClick={() => navigateTo('finance')} />}
+                            {isAdminOrSuper && <SidebarItem icon={<IconClipboard/>} label="الخدمات والأسعار" active={activeTab === 'services'} onClick={() => navigateTo('services')} />}
                             {isAdminOrSuper && <SidebarItem icon={<IconCog/>} label="الإعدادات" active={activeTab === 'settings'} onClick={() => navigateTo('settings')} />}
                         </nav>
                     </div>
@@ -1237,6 +1277,8 @@
                             {activeTab === 'daily' && currentUser.role === 'employee' && <DailyView payments={data.payments} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'payment', mode:'add', data:{branchId:currentUser.branchId}})} onEdit={(d)=>setModal({type:'payment', mode:'edit', data:d})} showToast={setToastMsg} />}
                             {activeTab === 'finance' && isSuperAdmin && <FinanceView payments={filteredData.payments} branches={data.branches} selectedBranch={selectedBranch} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={(bId)=>setModal({type:'payment', mode:'add', data:{branchId:bId}})} onEdit={(d)=>setModal({type:'payment', mode:'edit', data:d})} showToast={setToastMsg} />}
                                                         {activeTab === 'labs' && <LabsView focusId={focus?.tab === 'labs' ? focus.id : null} cases={filteredData.labCases} costs={costs} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'lab', mode:'add'})} onEdit={(d)=>setModal({type:'lab', mode:'edit', data:d})} showToast={setToastMsg} />}
+                            {activeTab === 'services' && isAdminOrSuper && <ServicesView services={data.services} specialties={data.specialties} staff={data.staff} showToast={setToastMsg} onConfirm={setConfirmAction} />}
+                            {activeTab === 'consults' && <ConsultsView consults={currentUser.role === 'employee' ? data.consults.filter(c => !c.branchId || c.branchId === currentUser.branchId) : data.consults} branches={data.branches} staff={data.staff} specialties={data.specialties} currentUser={currentUser} focusId={focus?.tab === 'consults' ? focus.id : null} showToast={setToastMsg} />}
                             {activeTab === 'settings' && isAdminOrSuper && <SettingsView sections={[{ k: 'branches', label: 'الفروع', node: <BranchesView branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'branch', mode:'add'})} onEdit={(d)=>setModal({type:'branch', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'templates', label: 'قوالب الرسائل', node: <TemplatesView showToast={setToastMsg} data={data} isSuper={isSuperAdmin} /> }, ...(isSuperAdmin ? [{ k: 'staff', label: 'الموظفين', node: <StaffView staff={staffFull} branches={data.branches} onConfirm={setConfirmAction} onAdd={(k)=>setModal({type:'staff', mode:'add', data:{kind:k}})} onEdit={(d)=>setModal({type:'staff', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'mycode', label: 'حسابي', node: <MasterCodeView currentUser={currentUser} showToast={setToastMsg} /> }, { k: 'backup', label: 'النسخ الاحتياطي', node: <BackupView showToast={setToastMsg} /> }, { k: 'telegram', label: 'تيليجرام', node: <TelegramView showToast={setToastMsg} branches={data.branches} staff={data.staff} /> }] : [])]} />}
                             {activeTab === 'dues' && !isDoctor && <DuesView focusIds={focus?.tab === 'dues' ? focus.ids : null} items={filteredData.dues} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'due', mode:'add'})} onEdit={(d)=>setModal({type:'due', mode:'edit', data:d})} showToast={setToastMsg} />}
                                                         {activeTab === 'consumables' && isAdminOrSuper && <ConsumablesView allItems={data.consumables} items={filteredData.consumables} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'consumable', mode:'add', data:{kind:'purchase'}})} onEdit={(d)=>setModal({type:'consumable', mode:'edit', data:d})} showToast={setToastMsg} />}
@@ -1997,7 +2039,7 @@
         }
 
         // ===== النسخ الاحتياطي (السوبر أدمن بس) =====
-        const BACKUP_COLS = ['branches', 'staff_members', 'staff_codes', 'staff_auth', 'public_doctors', 'patients', 'appointments', 'online_bookings', 'booked_slots', 'lab_cases', 'lab_costs', 'payments', 'shortages', 'consumables', 'dues', 'settings', 'private_config'];
+        const BACKUP_COLS = ['faqs', 'services', 'specialties', 'consults', 'branches', 'staff_members', 'staff_codes', 'staff_auth', 'public_doctors', 'patients', 'appointments', 'online_bookings', 'booked_slots', 'lab_cases', 'lab_costs', 'payments', 'shortages', 'consumables', 'dues', 'settings', 'private_config'];
         const packVal = v => v instanceof firebase.firestore.Timestamp ? { __ts: v.toMillis() } : Array.isArray(v) ? v.map(packVal) : (v && typeof v === 'object') ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, packVal(x)])) : v;
         const unpackVal = v => (v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === 1 && typeof v.__ts === 'number') ? firebase.firestore.Timestamp.fromMillis(v.__ts) : Array.isArray(v) ? v.map(unpackVal) : (v && typeof v === 'object') ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, unpackVal(x)])) : v;
         function BackupView({ showToast }) {
@@ -2365,12 +2407,204 @@
             );
         }
 
+        // ===== الخدمات والأسعار + التخصصات (الأدمن والسوبر أدمن) =====
+        const fmtPrice = (a, b) => { const x = Number(a) || 0, y = Number(b) || 0; if (!x && !y) return 'حسب الحالة'; if (!y || y === x) return x.toLocaleString('en-US') + ' ج'; return x.toLocaleString('en-US') + ' – ' + y.toLocaleString('en-US') + ' ج'; };
+        function ServicesView({ services, specialties, staff, showToast, onConfirm }) {
+            const [tab, setTab] = useState('services');
+            const [edit, setEdit] = useState(null);
+            const [spName, setSpName] = useState('');
+            const [spEdit, setSpEdit] = useState(null);
+            const inp = "w-full p-2.5 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500";
+            const docsOf = spId => staff.filter(x => x.role === 'doctor' && (x.specialties || []).includes(spId)).map(x => 'د. ' + x.name);
+            const saveSvc = (e) => {
+                e.preventDefault();
+                const f = e.target, d = { name: f.name.value.trim(), specialtyId: f.specialtyId.value, priceFrom: Number(f.priceFrom.value) || 0, priceTo: Number(f.priceTo.value) || 0, note: f.note.value.trim(), duration: f.duration.value.trim(), active: f.active.checked, order: Number(f.order.value) || 0 };
+                if (!d.name) return;
+                const p = edit.id ? db.collection('services').doc(edit.id).set(d, { merge: true }) : db.collection('services').add(d);
+                p.then(() => { setEdit(null); showToast('اتحفظت ✓'); }).catch(err => showToast(err.message));
+            };
+            const addSp = () => { const n = spName.trim(); if (!n) return; db.collection('specialties').add({ name: n, order: specialties.length + 1 }).then(() => setSpName('')).catch(err => showToast(err.message)); };
+            return (
+                <div className="space-y-4 w-full animate-fade-in">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                        <h3 className="text-lg font-black text-gray-800">الخدمات والأسعار</h3>
+                        <div className="flex bg-gray-100 p-1 rounded-xl">{[['services', 'الخدمات'], ['specialties', 'التخصصات']].map(([k, n]) => <button key={k} type="button" onClick={() => setTab(k)} className={`px-4 py-1.5 text-xs font-black rounded-lg ${tab === k ? 'bg-white shadow text-gold-600' : 'text-gray-500'}`}>{n}</button>)}</div>
+                    </div>
+
+                    {tab === 'specialties' && <div className="bg-white rounded-[20px] border border-gray-100 shadow-sm p-5 space-y-3 max-w-2xl">
+                        <p className="text-[11px] text-gray-500 font-bold">كل خدمة بتتبع تخصص، وكل دكتور بتختاري تخصصاته من بياناته. لما المريض يختار خدمة، بيظهرله الدكاترة اللي بيعملوا التخصص ده في الفرع اللي اختاره.</p>
+                        <div className="flex gap-2"><input value={spName} onChange={e => setSpName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addSp()} placeholder="تخصص جديد (مثال: تقويم)" className={inp} /><button type="button" onClick={addSp} className="bg-gold-500 text-white px-4 rounded-xl text-xs font-black shrink-0">+ إضافة</button></div>
+                        {specialties.length === 0 && <p className="text-xs text-gray-400 font-bold text-center py-4">مفيش تخصصات لسه.</p>}
+                        <div className="divide-y divide-gray-50">{specialties.map(sp => (
+                            <div key={sp.id} className="py-2.5 space-y-1">
+                                <EditableTitle value={sp.name} onChange={t => db.collection('specialties').doc(sp.id).update({ name: t }).catch(err => showToast(err.message))}
+                                    onDelete={() => db.collection('specialties').doc(sp.id).delete().then(() => showToast('اتحذف')).catch(err => showToast(err.message))}
+                                    deleteMsg={'حذف تخصص "' + sp.name + '"؟ الخدمات اللي تبعه هتفضل موجودة بس من غير تخصص.'} />
+                                <p className="text-[10px] font-bold text-gray-400">{services.filter(x => x.specialtyId === sp.id).length} خدمة • {docsOf(sp.id).join('، ') || 'مفيش دكاترة متحددين'}</p>
+                            </div>))}</div>
+                    </div>}
+
+                    {tab === 'services' && <>
+                        <div className="flex justify-between items-center"><p className="text-[11px] text-gray-500 font-bold">الأسعار دي بتظهر للمريض في صفحة الحجز كتكلفة تقريبية.</p>
+                            <button type="button" onClick={() => setEdit({ active: true })} className="bg-gold-500 text-white px-4 py-2 rounded-xl text-xs font-black shrink-0">+ خدمة جديدة</button></div>
+                        {services.length === 0 && <p className="text-xs text-gray-400 font-bold text-center py-6 bg-white rounded-2xl">مفيش خدمات لسه. ابدئي بإضافة التخصصات، وبعدين الخدمات.</p>}
+                        {[...specialties, { id: '', name: 'بدون تخصص' }].map(sp => { const list = services.filter(x => (x.specialtyId || '') === sp.id || (sp.id === '' && !specialties.some(y => y.id === x.specialtyId))); if (!list.length) return null; return (
+                            <div key={sp.id || 'none'} className="space-y-2">
+                                <p className="text-xs font-black text-gray-500 px-1">{sp.name}</p>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">{list.map(sv => (
+                                    <div key={sv.id} className={`bg-white rounded-2xl border border-gray-100 shadow-sm p-3 flex items-start gap-2 ${sv.active === false ? 'opacity-50' : ''}`}>
+                                        <div className="flex-1 min-w-0"><p className="text-sm font-black text-gray-800">{sv.name}{sv.active === false && <span className="text-[9px] text-gray-400 mr-1">(مخفية)</span>}</p>
+                                            <p className="text-xs font-black text-gold-700">{fmtPrice(sv.priceFrom, sv.priceTo)}{sv.duration ? <span className="text-gray-400 font-bold"> • {sv.duration}</span> : ''}</p>
+                                            {sv.note && <p className="text-[10px] font-bold text-gray-400 mt-0.5">{sv.note}</p>}</div>
+                                        <button type="button" title="تعديل" onClick={() => setEdit(sv)} className="w-7 h-7 rounded-lg bg-gray-100 text-gray-500 hover:text-gold-600 flex items-center justify-center shrink-0"><IcoEdit /></button>
+                                        <button type="button" title="حذف" onClick={() => onConfirm({ msg: 'حذف خدمة "' + sv.name + '"؟', onConfirm: () => db.collection('services').doc(sv.id).delete().catch(err => showToast(err.message)) })} className="w-7 h-7 rounded-lg bg-gray-100 text-gray-500 hover:text-red-600 flex items-center justify-center shrink-0"><IcoTrash /></button>
+                                    </div>))}</div>
+                            </div>); })}
+                    </>}
+
+                    {edit && <div className="fixed inset-0 bg-gray-900/50 z-[90] flex items-center justify-center p-4" onClick={() => setEdit(null)}>
+                        <form onSubmit={saveSvc} onClick={e => e.stopPropagation()} className="bg-white rounded-[24px] w-full max-w-md p-5 space-y-3">
+                            <h4 className="font-black text-gray-800">{edit.id ? 'تعديل خدمة' : 'خدمة جديدة'}</h4>
+                            <input name="name" defaultValue={edit.name} required placeholder="اسم الخدمة (مثال: زراعة سنة)" className={inp} />
+                            <select name="specialtyId" defaultValue={edit.specialtyId || ''} className={inp}><option value="">— بدون تخصص —</option>{specialties.map(sp => <option key={sp.id} value={sp.id}>{sp.name}</option>)}</select>
+                            <div className="grid grid-cols-2 gap-2"><label className="text-[10px] font-black text-gray-500">السعر من<input name="priceFrom" type="number" min="0" defaultValue={edit.priceFrom || ''} className={inp + ' mt-1'} /></label>
+                                <label className="text-[10px] font-black text-gray-500">لحد (اختياري)<input name="priceTo" type="number" min="0" defaultValue={edit.priceTo || ''} className={inp + ' mt-1'} /></label></div>
+                            <div className="grid grid-cols-2 gap-2"><input name="duration" defaultValue={edit.duration} placeholder="المدة (مثال: جلستين)" className={inp} /><input name="order" type="number" defaultValue={edit.order || ''} placeholder="الترتيب" className={inp} /></div>
+                            <input name="note" defaultValue={edit.note} placeholder="ملاحظة للمريض (اختياري)" className={inp} />
+                            <label className="flex items-center gap-2 text-xs font-black text-gray-700"><input name="active" type="checkbox" defaultChecked={edit.active !== false} /> ظاهرة للمرضى في الحجز</label>
+                            <div className="flex gap-2"><button className="flex-1 bg-gold-500 text-white py-2.5 rounded-xl font-black text-sm">حفظ</button><button type="button" onClick={() => setEdit(null)} className="px-4 bg-gray-100 rounded-xl font-black text-sm">إلغاء</button></div>
+                        </form>
+                    </div>}
+                </div>
+            );
+        }
+
+        // ===== الاستشارات الأونلاين =====
+        function ConsultsView(props) {
+            const isAdm = props.currentUser.role === 'admin' || props.currentUser.role === 'superadmin';
+            const [view, setView] = useState('consults');
+            return (<div className="space-y-4 w-full">
+                {isAdm && <div className="flex bg-gray-100 p-1 rounded-xl max-w-xs">{[['consults', 'الاستشارات'], ['faq', 'الأسئلة الشائعة']].map(([k, n]) => <button key={k} type="button" onClick={() => setView(k)} className={`flex-1 px-3 py-1.5 text-xs font-black rounded-lg ${view === k ? 'bg-white shadow text-gold-600' : 'text-gray-500'}`}>{n}</button>)}</div>}
+                {view === 'faq' && isAdm ? <FaqView {...props} /> : <ConsultsList {...props} />}
+            </div>);
+        }
+
+        // ===== الأسئلة الشائعة (بتظهر في الموقع) =====
+        function FaqView({ consults, showToast }) {
+            const [faqs, setFaqs] = useState(null);
+            const [edit, setEdit] = useState(null);
+            const [q, setQ] = useState('');
+            useEffect(() => db.collection('faqs').onSnapshot(s => setFaqs(s.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (a.order ?? 999) - (b.order ?? 999) || (b.createdAt || '').localeCompare(a.createdAt || ''))), e => showToast(e.message)), []);
+            if (!faqs) return <p className="text-xs font-bold text-gray-400">...</p>;
+            const used = new Set(faqs.map(f => f.fromConsult).filter(Boolean));
+            const pending = consults.filter(c => (c.replies || []).length && !used.has(c.id));
+            const importAll = () => {
+                if (!pending.length) { showToast('مفيش استشارات جديدة مترد عليها'); return; }
+                const b = db.batch();
+                pending.forEach(c => b.set(db.collection('faqs').doc(), { q: c.question, a: (c.replies || []).map(r => r.text).join('\n\n'), topic: c.topic || '', published: false, fromConsult: c.id, createdAt: new Date().toISOString() }));
+                b.commit().then(() => showToast('اتضاف ' + pending.length + ' سؤال كمسودة — راجعيهم وانشريهم')).catch(e => showToast(e.message));
+            };
+            const save = e => {
+                e.preventDefault(); const f = e.target;
+                const d = { q: f.q.value.trim(), a: f.a.value.trim(), topic: f.topic.value.trim(), published: f.published.checked, order: Number(f.order.value) || 0 };
+                if (!d.q || !d.a) return;
+                (edit.id ? db.collection('faqs').doc(edit.id).set(d, { merge: true }) : db.collection('faqs').add({ ...d, createdAt: new Date().toISOString() })).then(() => { setEdit(null); showToast('اتحفظ ✓'); }).catch(err => showToast(err.message));
+            };
+            const shown = faqs.filter(f => !q || (f.q + ' ' + f.a + ' ' + (f.topic || '')).includes(q));
+            const inp = "w-full p-2.5 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500";
+            return (
+                <div className="space-y-3 animate-fade-in">
+                    <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3 text-[11px] font-bold text-amber-800 leading-relaxed">اللي متعلّم عليه "منشور" بس هو اللي بيظهر في الموقع. قبل النشر راجعي السؤال والإجابة واشيلي أي اسم أو رقم أو تفاصيل تعرّف المريض. اسم المريض ورقمه مش بيتنقلوا أصلاً.</div>
+                    <div className="flex flex-wrap gap-2 items-center">
+                        <button type="button" onClick={() => setEdit({ published: true })} className="bg-gold-500 text-white px-3 py-2 rounded-xl text-xs font-black">+ سؤال جديد</button>
+                        <button type="button" onClick={importAll} className="bg-gray-900 text-white px-3 py-2 rounded-xl text-xs font-black">⬇ هات الاستشارات المردود عليها ({pending.length}) كمسودات</button>
+                        <input value={q} onChange={e => setQ(e.target.value)} placeholder="بحث..." className="p-2 bg-white border border-gray-200 rounded-xl text-xs font-bold mr-auto w-40" />
+                    </div>
+                    <p className="text-[11px] font-bold text-gray-500">{faqs.filter(f => f.published).length} منشور • {faqs.filter(f => !f.published).length} مسودة</p>
+                    {shown.map(f => <div key={f.id} className={`bg-white rounded-2xl border shadow-sm p-4 space-y-1.5 ${f.published ? 'border-emerald-200' : 'border-gray-100'}`}>
+                        <div className="flex items-start gap-2">
+                            <p className="flex-1 text-sm font-black text-gray-800">❓ {f.q}</p>
+                            <button type="button" onClick={() => db.collection('faqs').doc(f.id).update({ published: !f.published }).catch(e => showToast(e.message))} className={`text-[10px] font-black px-2 py-1 rounded-lg shrink-0 ${f.published ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-500'}`}>{f.published ? '✓ منشور' : 'مسودة — انشر'}</button>
+                            <button type="button" title="تعديل" onClick={() => setEdit(f)} className="w-7 h-7 rounded-lg bg-gray-100 text-gray-500 hover:text-gold-600 flex items-center justify-center shrink-0"><IcoEdit /></button>
+                            <button type="button" title="حذف" onClick={() => confirm('حذف السؤال ده؟') && db.collection('faqs').doc(f.id).delete().catch(e => showToast(e.message))} className="w-7 h-7 rounded-lg bg-gray-100 text-gray-500 hover:text-red-600 flex items-center justify-center shrink-0"><IcoTrash /></button>
+                        </div>
+                        <p className="text-xs font-bold text-gray-600 whitespace-pre-line">{f.a}</p>
+                        {f.topic && <p className="text-[10px] font-black text-gold-700">{f.topic}</p>}
+                    </div>)}
+                    {edit && <div className="fixed inset-0 bg-gray-900/50 z-[90] flex items-center justify-center p-4" onClick={() => setEdit(null)}>
+                        <form onSubmit={save} onClick={e => e.stopPropagation()} className="bg-white rounded-[24px] w-full max-w-lg p-5 space-y-3">
+                            <h4 className="font-black text-gray-800">{edit.id ? 'تعديل سؤال' : 'سؤال جديد'}</h4>
+                            <textarea name="q" rows="2" defaultValue={edit.q} required placeholder="السؤال" className={inp} />
+                            <textarea name="a" rows="5" defaultValue={edit.a} required placeholder="الإجابة" className={inp} />
+                            <div className="grid grid-cols-2 gap-2"><input name="topic" defaultValue={edit.topic} placeholder="التصنيف (مثال: تقويم)" className={inp} /><input name="order" type="number" defaultValue={edit.order || ''} placeholder="الترتيب" className={inp} /></div>
+                            <label className="flex items-center gap-2 text-xs font-black text-gray-700"><input name="published" type="checkbox" defaultChecked={!!edit.published} /> منشور في الموقع</label>
+                            <div className="flex gap-2"><button className="flex-1 bg-gold-500 text-white py-2.5 rounded-xl font-black text-sm">حفظ</button><button type="button" onClick={() => setEdit(null)} className="px-4 bg-gray-100 rounded-xl font-black text-sm">إلغاء</button></div>
+                        </form></div>}
+                </div>
+            );
+        }
+
+        function ConsultsList({ consults, branches, staff, specialties, currentUser, focusId, showToast }) {
+            const isDoc = currentUser.role === 'doctor';
+            const [f, setF] = useState('new');
+            const [open, setOpen] = useState(focusId || null);
+            const [reply, setReply] = useState({});
+            const doctors = staff.filter(x => x.role === 'doctor');
+            const st = c => c.sentToPatientAt ? 'sent' : (c.replies || []).length ? 'answered' : 'new';
+            const ST = { new: ['مستنية رد', 'bg-red-50 text-red-600'], answered: ['اترد عليها — لسه متبعتتش للمريض', 'bg-amber-50 text-amber-700'], sent: ['اتبعت الرد للمريض', 'bg-emerald-50 text-emerald-700'] };
+            const list = consults.filter(c => f === 'all' || st(c) === f);
+            const counts = { new: 0, answered: 0, sent: 0 }; consults.forEach(c => counts[st(c)]++);
+            const send = (c) => {
+                const t = (reply[c.id] || '').trim(); if (!t) return;
+                const r = { by: (isDoc ? 'د. ' : '') + currentUser.name, byId: currentUser.id, text: t, at: new Date().toISOString(), via: 'system' };
+                db.collection('consults').doc(c.id).update({ replies: firebase.firestore.FieldValue.arrayUnion(r), status: 'answered', answeredAt: r.at })
+                    .then(() => { setReply(x => ({ ...x, [c.id]: '' })); showToast('اتسجل الرد ✓');
+                        tgSend(fillT('tgConsultReply', { code: c.id, patient: c.name, by: r.by, reply: t }), c.branchId, 'consult', []); })
+                    .catch(e => showToast(e.message));
+            };
+            const reassign = (c, docId) => {
+                const d = doctors.find(x => x.id === docId);
+                db.collection('consults').doc(c.id).update({ doctorId: docId, doctorName: d ? d.name : '', targets: docId ? [docId] : [], tgSent: false }).then(() => showToast('اتحولت — هيوصله تيليجرام')).catch(e => showToast(e.message));
+            };
+            const lastReply = c => (c.replies || []).slice(-1)[0];
+            return (
+                <div className="space-y-4 w-full animate-fade-in">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                        <h3 className="text-lg font-black text-gray-800">الاستشارات الأونلاين</h3>
+                        <div className="flex bg-gray-100 p-1 rounded-xl overflow-x-auto">{[['new', 'مستنية رد'], ['answered', 'اترد عليها'], ['sent', 'اتبعتت للمريض'], ['all', 'الكل']].map(([k, n]) => <button key={k} type="button" onClick={() => setF(k)} className={`px-3 py-1.5 text-[11px] font-black rounded-lg whitespace-nowrap ${f === k ? 'bg-white shadow text-gold-600' : 'text-gray-500'}`}>{n}{k !== 'all' ? ' (' + counts[k] + ')' : ''}</button>)}</div>
+                    </div>
+                    <p className="text-[10px] text-gray-400 font-bold">الدكتور بيرد من تيليجرام (Reply على رسالة الاستشارة) أو من هنا. الرد بيظهر للمريض في صفحة الحجز بكود الاستشارة، وتقدري تبعتيهوله واتساب من الزرار.</p>
+                    {list.length === 0 && <p className="text-xs text-gray-400 font-bold text-center py-8 bg-white rounded-2xl">مفيش استشارات هنا.</p>}
+                    {list.map(c => { const s0 = st(c), isOpen = open === c.id, lr = lastReply(c), br = branches.find(b => b.id === c.branchId);
+                        return (
+                        <div key={c.id} className="bg-white rounded-[20px] border border-gray-100 shadow-sm">
+                            <div className="p-4 cursor-pointer space-y-1.5" onClick={() => setOpen(isOpen ? null : c.id)}>
+                                <div className="flex items-center gap-2 flex-wrap"><span className="text-sm font-black text-gray-800">{c.name}</span><span className={`text-[10px] font-black px-2 py-0.5 rounded-lg ${ST[s0][1]}`}>{ST[s0][0]}</span><span className="text-[10px] font-mono text-gray-400 mr-auto">#{c.id}</span></div>
+                                <p className="text-[11px] font-bold text-gray-500">{[c.topic, c.doctorName ? 'لـ د. ' + c.doctorName : ((c.targets || []).length ? 'لأي دكتور مناسب (' + c.targets.length + ')' : 'للإدارة'), br && 'فرع ' + br.name, new Date(c.createdAt).toLocaleString('ar-EG', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })].filter(Boolean).join(' • ')}</p>
+                                <p className={`text-xs font-bold text-gray-700 ${isOpen ? 'whitespace-pre-line' : 'truncate'}`}>❓ {c.question}</p>
+                            </div>
+                            {isOpen && <div className="px-4 pb-4 space-y-3 border-t border-gray-100 pt-3">
+                                {!isDoc && <p className="text-xs font-bold text-gray-600">📞 <span dir="ltr">{c.phone}</span></p>}
+                                {(c.replies || []).map((r, i) => <div key={i} className="bg-emerald-50 border border-emerald-100 rounded-xl p-3"><p className="text-[10px] font-black text-emerald-700 mb-1">{r.by} • {r.via === 'telegram' ? 'من تيليجرام' : 'من السيستم'} • {new Date(r.at).toLocaleString('ar-EG', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })}</p><p className="text-xs font-bold text-gray-800 whitespace-pre-line">{r.text}</p></div>)}
+                                <div className="space-y-2"><textarea rows="3" value={reply[c.id] || ''} onChange={e => setReply(x => ({ ...x, [c.id]: e.target.value }))} placeholder={isDoc ? 'اكتب ردك على المريض...' : 'اكتبي رد (لو الدكتور رد في التليفون مثلاً)...'} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl text-xs font-bold outline-none focus:border-gold-500" />
+                                    <button type="button" onClick={() => send(c)} className="bg-gray-900 text-white px-4 py-2 rounded-xl text-xs font-black">حفظ الرد</button></div>
+                                {!isDoc && <div className="flex flex-wrap gap-2 items-center border-t border-gray-100 pt-3">
+                                    {lr && <a href={waUrl(c.phone, fillT('consultReply', { name: c.name, doctor: lr.by, reply: lr.text })) || '#'} target={WA_TARGET} rel="noreferrer" onClick={() => db.collection('consults').doc(c.id).update({ sentToPatientAt: new Date().toISOString(), sentBy: currentUser.name }).catch(() => {})} className="bg-green-500 text-white px-3 py-2 rounded-xl text-xs font-black">📲 ابعت الرد للمريض واتساب</a>}
+                                    {c.sentToPatientAt && <span className="text-[10px] font-bold text-emerald-600">اتبعت {c.sentBy ? 'بواسطة ' + c.sentBy : ''}</span>}
+                                    <label className="text-[11px] font-bold text-gray-500 flex items-center gap-1 mr-auto">تحويل لـ <select value={c.doctorId || ''} onChange={e => reassign(c, e.target.value)} className="p-1.5 bg-gray-50 border border-gray-100 rounded-lg text-[11px] font-bold"><option value="">— الإدارة —</option>{doctors.map(d => <option key={d.id} value={d.id}>د. {d.name}</option>)}</select></label>
+                                </div>}
+                            </div>}
+                        </div>); })}
+                </div>
+            );
+        }
+
         function TemplatesView({ showToast, data, isSuper }) {
             const [v, setV] = useState(() => ({ _titles: {}, _deleted: [], _quiet: { ...(TG.quiet || {}) }, ...JSON.parse(JSON.stringify(TPL)) }));
             const [tab, setTab] = useState('wa');
             const [dirty, setDirty] = useState(false);
-            const WA = { reminder: ['تذكير الموعد', '{name} {branch} {date} {time}'], review: ['طلب التقييم', '{name} {branch} {link}'], followup: ['متابعة المريض', '{name} {branch} {service}'], lab: ['رسالة المعمل', '{patient} {case} {date}'] };
-            const TG_L = { tgResched: ['تعديل ميعاد حجز', '{patient} {phone} {oldDate} {oldTime} {oldDoctor} {date} {time} {doctor} {branch} {by}'], tgApp: ['حجز جديد', '{patient} {date} {time} {service} {doctor} {branch} {by} | {count} = حجوزات نفس اليوم في الفرع، {countAll} = كل الفروع'], tgShortage: ['نقص جديد', '{item} {qty} {branch} {by} | {count} = نواقص الفرع، {countAll} = كل الفروع'], tgDue: ['فاتورة / مستحق جديد', '{party} {amount} {due} {branch} {by} | {sum} = إجمالي المستحق للفرع، {count} = عدد الفواتير، {sumAll} و{countAll} = كل الفروع'], tgLab: ['تذكير المعمل', '{days} {lab} {patient} {case} {branch}'], tgFollow: ['موعد متابعة مريض', '{patient} {service} {branch}'] , tgOnline: ['حجز أونلاين جديد', '{patient} {phone} {date} {time} {service} {doctor} {code} {branch} | {count} = حجوزات نفس اليوم في الفرع'], tgCancel: ['كنسل أو تأجيل', '{kind} {patient} {phone} {date} {time} {service} {doctor} {branch}'], tgDigest: ['ملخص الصبح اليومي', '{branch} {date} {today} {online} {tomorrow} {follow} {lab} {short}'] };
+            const WA = { consultReply: ['رد الاستشارة للمريض', '{name} {doctor} {reply}'], reminder: ['تذكير الموعد', '{name} {branch} {date} {time}'], review: ['طلب التقييم', '{name} {branch} {link}'], followup: ['متابعة المريض', '{name} {branch} {service}'], lab: ['رسالة المعمل', '{patient} {case} {date}'] };
+            const TG_L = { tgConsult: ['استشارة أونلاين جديدة', '{code} {patient} {phone} {branch} {topic} {doctor} {question}'], tgConsultReply: ['تم الرد على استشارة', '{code} {patient} {by} {reply}'], tgResched: ['تعديل ميعاد حجز', '{patient} {phone} {oldDate} {oldTime} {oldDoctor} {date} {time} {doctor} {branch} {by}'], tgApp: ['حجز جديد', '{patient} {date} {time} {service} {doctor} {branch} {by} | {count} = حجوزات نفس اليوم في الفرع، {countAll} = كل الفروع'], tgShortage: ['نقص جديد', '{item} {qty} {branch} {by} | {count} = نواقص الفرع، {countAll} = كل الفروع'], tgDue: ['فاتورة / مستحق جديد', '{party} {amount} {due} {branch} {by} | {sum} = إجمالي المستحق للفرع، {count} = عدد الفواتير، {sumAll} و{countAll} = كل الفروع'], tgLab: ['تذكير المعمل', '{days} {lab} {patient} {case} {branch}'], tgFollow: ['موعد متابعة مريض', '{patient} {service} {branch}'] , tgOnline: ['حجز أونلاين جديد', '{patient} {phone} {date} {time} {service} {doctor} {code} {branch} | {count} = حجوزات نفس اليوم في الفرع'], tgCancel: ['كنسل أو تأجيل', '{kind} {patient} {phone} {date} {time} {service} {doctor} {branch}'], tgDigest: ['ملخص الصبح اليومي', '{branch} {date} {today} {online} {tomorrow} {follow} {lab} {short}'] };
             // جدول الصبح: مجموعتين (كل مجموعة بتتحذف/تتسمّى مع بعض)
             const GROUPS = {
                 grpSched: ['جدول مواعيد الصبح (الإدارة / الفروع / الأدمنز)', [['tgSchedHead', 'أول الرسالة', '{branch} {date} {count} {canceled}'], ['tgSchedDoctor', 'عنوان كل دكتور', '{doctor} {count}'], ['tgSchedLine', 'سطر كل حجز', '{time} {patient} {service} {phone} {status} {online}'], ['tgSchedEmpty', 'لو مفيش حجوزات', '{branch} {date} {canceled}', 'branch', 'متبعتش جدول الفرع لو مفيهوش حجوزات']]],
@@ -2816,12 +3050,13 @@
             );
         }
 
-        function DataModal({ modal, branches, user, selectedBranch, onClose, showToast, staff = [], costs = {}, labNames = [], labPhones = {}, lastCosts = {} }) {
+        function DataModal({ modal, branches, user, selectedBranch, onClose, showToast, staff = [], costs = {}, labNames = [], labPhones = {}, lastCosts = {}, specialties = [] }) {
             const [pBranch, setPBranch] = useState(modal.data?.branchId || (user.role === 'employee' ? user.branchId : (selectedBranch !== 'all' ? selectedBranch : (branches[0]?.id || ''))));
             const pDocs = staff.filter(x => x.role === 'doctor' && doctorBranchIds(x, branches).includes(pBranch));
             const [appDate, setAppDate] = useState(modal.data?.date || localDay());
             const [docBr, setDocBr] = useState(() => modal.type === 'staff' && modal.data?.role === 'doctor' ? doctorBranchIds(modal.data, branches) : []);
             const [docSched, setDocSched] = useState(() => (modal.type === 'staff' && modal.data?.schedule) || {});
+            const [docSpecs, setDocSpecs] = useState(() => (modal.type === 'staff' && Array.isArray(modal.data?.specialties) ? modal.data.specialties : []));
             const toggleDay = (bid, day) => setDocSched(s0 => { const cur = s0[bid] || []; return { ...s0, [bid]: cur.includes(day) ? cur.filter(x => x !== day) : [...cur, day].sort() }; });
             const [appBranch, setAppBranch] = useState(modal.data?.branchId || (user.role === 'employee' ? user.branchId : (selectedBranch !== 'all' ? selectedBranch : (branches[0]?.id || ''))));
             const [jobTitle, setJobTitle] = useState(modal.data?.jobTitle || modal.data?.kind || (modal.data?.role === 'doctor' ? 'طبيب' : 'سكرتارية'));
@@ -2841,7 +3076,7 @@
                     if (f.jobTitle.value === 'طبيب') {
                         const ids = branches.map(b => b.id).filter(id => docBr.includes(id));
                         if (ids.length === 0) { showToast("اختاري فرع واحد على الأقل للطبيب"); return; }
-                        d={name:f.name.value, username:f.username.value, password:f.password.value, branchId:ids[0], branchIds:ids, jobTitle:'طبيب', role:'doctor', schedule:Object.fromEntries(ids.map(id => [id, docSched[id] || []]))};
+                        d={name:f.name.value, username:f.username.value, password:f.password.value, branchId:ids[0], branchIds:ids, jobTitle:'طبيب', role:'doctor', schedule:Object.fromEntries(ids.map(id => [id, docSched[id] || []])), specialties: docSpecs.filter(id => specialties.some(x => x.id === id))};
                     } else {
                         d={name:f.name.value, username:f.username.value, password:f.password.value, branchId:f.bId.value, branchIds:[], jobTitle:f.jobTitle.value, role: f.bId.value==='all'?'admin':'employee'};
                     }
@@ -2855,7 +3090,7 @@
                     d={amount:f.amt.value, date:f.dt ? f.dt.value : localDay(), branchId:user.role==='employee'?user.branchId:f.bId.value, receivedBy:user.name, paymentMethod: f.payMethod.value};
                     if(modal.mode!=='edit') { d.delivered=false; d.recordedBy=user.name; d.recordedById=user.id || ''; d.createdDay=localDay(); d.createdAt=new Date().toISOString(); }
                 } else if(modal.type==='branch') {
-                    col='branches'; d={name:f.name.value, phone:f.phone.value, address: f.address.value, mapsLink: f.mapsLink.value, reviewLink: f.reviewLink.value};
+                    col='branches'; d={name:f.name.value, phone:f.phone.value, address: f.address.value, mapsLink: f.mapsLink.value, reviewLink: f.reviewLink.value, hours: f.hours.value.trim(), waitTime: f.waitTime.value.trim(), consultFee: f.consultFee.value.trim(), mapEmbed: f.mapEmbed.value.trim()};
                 } else if(modal.type==='lab') {
                     col='lab_cases'; d={labName:f.labName.value.trim(), patientName:f.patientName.value, caseType:f.caseType.value, sentDate:f.sentDate.value, dueDate:f.dueDate.value, labPhone:f.labPhone.value.trim(), notes:f.notes.value, branchId:(user.role==='admin' || user.role==='superadmin')?f.bId.value:user.branchId};
                     d.remindDays = Number(f.remindDays.value);
@@ -3094,6 +3329,9 @@
                                         </div>
                                         {jobTitle === 'طبيب' ? (
                                             <div className="space-y-1">
+                                                <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">تخصصات الطبيب (بيظهر للمرضى في الحجز حسب الخدمة اللي اختاروها)</label>
+                                                {specialties.length === 0 ? <p className="text-[10px] font-bold text-amber-600 bg-amber-50 rounded-lg p-2">مفيش تخصصات لسه — ضيفيها من "الخدمات والأسعار".</p> :
+                                                <div className="flex flex-wrap gap-1.5 pb-2">{specialties.map(sp => { const on = docSpecs.includes(sp.id); return <button key={sp.id} type="button" onClick={() => setDocSpecs(v => on ? v.filter(x => x !== sp.id) : [...v, sp.id])} className={`px-2.5 py-1.5 rounded-lg text-[11px] font-black border ${on ? 'bg-gold-500 text-white border-gold-500' : 'bg-white text-gray-600 border-gray-200'}`}>{on ? '✓ ' : ''}{sp.name}</button>; })}</div>}
                                                 <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest block">فروع الطبيب وأيام شغله في كل فرع</label>
                                                 <p className="text-[10px] text-gray-400 font-bold">الأيام دي مش بتظهر للمرضى. لو المريض اختار يوم مش من أيامه، بيظهرله إن الدكتور مش متاح. لو مختارتيش أيام = متاح كل الأيام.</p>
                                                 <div className="space-y-2">
@@ -3126,6 +3364,14 @@
                                         <Input name="address" label="العنوان التفصيلي" defaultValue={modal.data?.address} placeholder="مثال: شارع مصطفى النحاس، المنيا" />
                                         <Input name="mapsLink" label="رابط جوجل مابس (Google Maps)" defaultValue={modal.data?.mapsLink} placeholder="https://maps.app.goo.gl/..." dir="ltr" />
                                         <Input name="reviewLink" label="رابط تقييم جوجل (لرسالة التقييم)" defaultValue={modal.data?.reviewLink} placeholder="https://g.page/r/..." dir="ltr" />
+                                        <p className="text-[10px] font-black text-gray-500 pt-2 border-t border-gray-100">بيانات بتظهر للمريض في صفحة الحجز</p>
+                                        <Input name="hours" label="مواعيد العمل" defaultValue={modal.data?.hours} placeholder="مثال: يومياً من 4 م لـ 10 م — الجمعة إجازة" />
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <Input name="waitTime" label="مدة الانتظار المتوقعة" defaultValue={modal.data?.waitTime} placeholder="مثال: 10–15 دقيقة" />
+                                            <Input name="consultFee" label="سعر الكشف" defaultValue={modal.data?.consultFee} placeholder="مثال: 200 ج" />
+                                        </div>
+                                        <Input name="mapEmbed" label="الخريطة: كود التضمين من جوجل مابس أو اسم المكان" defaultValue={modal.data?.mapEmbed} placeholder='<iframe src="https://www.google.com/maps/embed?...' dir="ltr" />
+                                        <p className="text-[9px] text-gray-400 font-bold leading-relaxed">من جوجل مابس: افتحي مكان الفرع ← مشاركة (Share) ← تضمين خريطة (Embed a map) ← نسخ HTML والصقيه هنا. لو سبتيه فاضي هيستخدم العنوان.</p>
                                     </>
                                 )}
                                 <button type="submit" className="w-full py-4 mt-6 bg-gold-500 text-white rounded-xl font-black shadow-lg hover:bg-gold-600 transition-colors text-sm">حفظ التغييرات</button>
