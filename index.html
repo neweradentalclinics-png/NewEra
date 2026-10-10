@@ -193,13 +193,13 @@
         // السوبر أدمن يحطه من: الإعدادات → تيليجرام.
         // أنواع الإشعارات، وكل نوع بيروح للإدارة (الشات الرئيسي) و/أو لسكرتارية الفرع حسب الإعدادات
         const TG_KINDS = [
-            ['booking', 'حجز جديد من السيستم'], ['online', 'حجز أونلاين جديد (الموقع / صفحة الحجز)'], ['cancel', 'كنسل أو تأجيل'], ['reschedule', 'تعديل ميعاد حجز'],
+            ['booking', 'حجز جديد من السيستم'], ['online', 'حجز أونلاين جديد (الموقع / صفحة الحجز)'], ['unsched', 'حجز أونلاين محتاج تظبيط ميعاد (مفيش دكتور فاضي)'], ['cancel', 'كنسل أو تأجيل'], ['reschedule', 'تعديل ميعاد حجز'],
             ['follow', 'موعد متابعة مريض'], ['lab', 'تذكير حالة معمل'], ['shortage', 'نقص جديد'], ['due', 'فاتورة / مستحق جديد'], ['digest', 'ملخص الصبح اليومي (أرقام)'], ['schedule', 'جدول مواعيد النهاردة'], ['consult', 'استشارة أونلاين (جديدة + الرد عليها)']
         ];
         const ALL_KINDS = TG_KINDS.map(k => k[0]);
-        const TG_DEFAULT_ROUTES = { main: ['booking', 'online', 'cancel', 'follow', 'lab', 'shortage', 'due', 'schedule', 'reschedule', 'consult'], branch: ['booking', 'online', 'cancel', 'follow', 'lab', 'shortage', 'digest', 'reschedule'] };
+        const TG_DEFAULT_ROUTES = { main: ['booking', 'online', 'unsched', 'cancel', 'follow', 'lab', 'shortage', 'due', 'schedule', 'reschedule', 'consult'], branch: ['booking', 'online', 'unsched', 'cancel', 'follow', 'lab', 'shortage', 'digest', 'reschedule'] };
         // الافتراضي لكل شخص جديد في قايمة الأشخاص
-        const PERSON_DEFAULT = { doctor: ['booking', 'online', 'cancel', 'reschedule', 'schedule'], admin: ['booking', 'online', 'cancel', 'reschedule', 'follow', 'lab', 'shortage', 'due', 'schedule', 'consult'] };
+        const PERSON_DEFAULT = { doctor: ['booking', 'online', 'cancel', 'reschedule', 'schedule'], admin: ['booking', 'online', 'unsched', 'cancel', 'reschedule', 'follow', 'lab', 'shortage', 'due', 'schedule', 'consult'] };
         // الدكتور: الحاجات دي بتوصله لو تخصه هو بس (حجوزاته / مرضاه). الباقي بيوصله لو في فروعه
         const DOCTOR_OWN_KINDS = ['booking', 'online', 'cancel', 'reschedule', 'follow', 'consult'];
         // إشعارات جديدة بتتضاف للإعدادات المحفوظة قبلها بقيمتها الافتراضية
@@ -258,7 +258,7 @@
             const base = { branch: branch.name, date: dayTxtOf(date), count: list.length, canceled: canceled ? '• ' + canceled + ' كنسل' : '' };
             if (!list.length) return [fillTidy('tgSchedEmpty', base)];
             const groups = {};
-            list.forEach(a => { const k = a.doctorName ? 'د. ' + a.doctorName : 'بدون دكتور'; (groups[k] = groups[k] || []).push(a); });
+            list.forEach(a => { const k = a.needsSchedule ? '⚠️ محتاج تظبيط ميعاد (كلّموه)' : a.doctorName ? 'د. ' + a.doctorName : 'بدون دكتور'; (groups[k] = groups[k] || []).push(a); });
             return packMsgs(fillTidy('tgSchedHead', base), Object.entries(groups).map(([doc, arr]) => fillTidy('tgSchedDoctor', { doctor: doc, count: arr.length }) + '\n' + arr.map(a => schedLine('tgSchedLine', a)).join('\n')));
         };
         // جدول الدكتور نفسه: حجوزاته النهاردة في كل الفروع
@@ -407,6 +407,7 @@
             tgDue: '🧾 فاتورة جديدة — {branch}\nالجهة: {party}\nالمبلغ: {amount} ج\nموعد السداد: {due}\nبواسطة: {by}\n\n📊 إجمالي المستحق في {branch}: {sum} ج ({count} فاتورة)',
             tgLab: '⏰ حالة معمل مر عليها {days} — اطلبيها من المعمل\nالمعمل: {lab}\nالمريض: {patient}\nالنوع: {case}\nالفرع: {branch}',
             tgFollow: '📞 موعد متابعة مريض: {patient}\nالخدمة: {service}\nالفرع: {branch}',
+            tgUnsched: '⚠️ حجز أونلاين محتاج تظبيط ميعاد — فرع {branch}\nالمريض: {patient}\nالموبايل: {phone}\nاليوم اللي عاوزه: {date} {time}\nالخدمة: {service}\nكود الحجز: {code}\n\nمفيش دكتور مناسب فاضي في الميعاد ده — كلّموه ظبّطوا معاه ميعاد وشجّعوه ييجي 🙏',
             tgOnline: '🌐 حجز أونلاين جديد — فرع {branch}\nالمريض: {patient}\nالموبايل: {phone}\nالموعد: {date} {time}\nالخدمة: {service}\nالدكتور: {doctor}\nكود الحجز: {code}\n\n📊 إجمالي حجوزات {date} في {branch}: {count}',
             tgCancel: '❌ {kind} — فرع {branch}\nالمريض: {patient}\nالموبايل: {phone}\nالموعد كان: {date} {time}\nالخدمة: {service}\nالدكتور: {doctor}\n📞 اتسجل في سجل المرضى للمتابعة',
             tgResched: '🔄 تعديل ميعاد حجز — فرع {branch}\nالمريض: {patient}\nالموبايل: {phone}\nكان: {oldDate} {oldTime} — {oldDoctor}\nبقى: {date} {time} — {doctor}\nبواسطة: {by}',
@@ -430,7 +431,7 @@
         const TPL = { ...TPL_DEFAULT };
         // القوالب المحذوفة: الرسالة دي مش بتتبعت/زرارها مش بيظهر. _quiet = متبعتش الجدول لو فاضي
         const tplOn = k => !((TPL._deleted || []).includes(k));
-        const TPL_KIND = { tgApp: 'booking', tgOnline: 'online', tgCancel: 'cancel', tgResched: 'reschedule', tgFollow: 'follow', tgLab: 'lab', tgShortage: 'shortage', tgDue: 'due', tgDigest: 'digest', tgConsult: 'consult' };
+        const TPL_KIND = { tgApp: 'booking', tgOnline: 'online', tgUnsched: 'unsched', tgCancel: 'cancel', tgResched: 'reschedule', tgFollow: 'follow', tgLab: 'lab', tgShortage: 'shortage', tgDue: 'due', tgDigest: 'digest', tgConsult: 'consult' };
         const fillT = (k, v) => String(TPL[k] || '').replace(/\{(\w+)\}/g, (m, x) => v[x] ?? '');
         // بيانات حية لحساب الإجماليات في رسائل تيليجرام (بتتحدث من App)
         const LIVE = { appointments: [], dues: [], shortages: [], branches: [], staff: [] };
@@ -710,7 +711,7 @@
                     text = `💬 استشارة أونلاين جديدة: ${x.name}`;
                     category = 'consults';
                 } else if (kind === 'appointments') {
-                    text = `📅 حجز جديد: ${x.patientName} — ${x.date} ${x.time || ''}`;
+                    text = x.needsSchedule ? `⚠️ حجز أونلاين محتاج تظبيط ميعاد: ${x.patientName} — ${x.date} ${x.time || ''} (مفيش دكتور فاضي — كلّموه)` : `📅 حجز جديد: ${x.patientName} — ${x.date} ${x.time || ''}`;
                     category = 'bookings';
                 } else if (kind === 'dues') {
                     text = `🧾 فاتورة/مستحق جديد: ${x.party} — ${Number(x.amount) || 0} ج`;
@@ -833,7 +834,8 @@
                         if (!won) return;
                         const bn = (data.branches.find(b => b.id === a.branchId) || {}).name || '';
                         const count = data.appointments.filter(x => x.date === a.date && x.branchId === a.branchId && x.status !== 'canceled').length;
-                        tgSend(fillT('tgOnline', { patient: a.patientName, phone: a.phone || '', date: a.date, time: a.time || '', service: a.service || '', doctor: a.doctorName || '', code: a.bookingCode || '', branch: bn, count }), a.branchId, 'online', a.doctorId);
+                        if (a.needsSchedule) tgSend(fillT('tgUnsched', { patient: a.patientName, phone: a.phone || '', date: a.date, time: a.time || '', service: a.service || '', code: a.bookingCode || '', branch: bn }), a.branchId, 'unsched');
+                        else tgSend(fillT('tgOnline', { patient: a.patientName, phone: a.phone || '', date: a.date, time: a.time || '', service: a.service || '', doctor: a.doctorName || '', code: a.bookingCode || '', branch: bn, count }), a.branchId, 'online', a.doctorId);
                     }).catch(() => {});
                 });
             }, [data.appointments, currentUser]);
@@ -1044,7 +1046,7 @@
                     try {
                         const today = localDay();
                         const want = {};
-                        data.appointments.forEach(a => { if (!a.date || !a.time || a.date < today || a.status === 'canceled') return; want[[a.branchId, a.doctorId || 'none', a.date, a.time].join('_')] = { branchId: a.branchId || '', doctorId: a.doctorId || '', date: a.date, time: a.time }; });
+                        data.appointments.forEach(a => { if (!a.date || !a.time || a.date < today || a.status === 'canceled' || a.needsSchedule) return; want[[a.branchId, a.doctorId || 'none', a.date, a.time].join('_')] = { branchId: a.branchId || '', doctorId: a.doctorId || '', date: a.date, time: a.time }; });
                         const have = await db.collection('booked_slots').where('date', '>=', today).get();
                         const b = db.batch(); let n = 0;
                         Object.entries(want).forEach(([id, v]) => { if (!have.docs.some(x => x.id === id)) { b.set(db.collection('booked_slots').doc(id), v); n++; } });
@@ -1839,6 +1841,8 @@
                                                                     {a.estimate && <span className="text-[8px] bg-amber-50 text-amber-700 px-1.5 rounded font-bold">💳 {a.estimate}</span>}
                                                                     {a.extra && Object.entries(a.extra).map(([k, v]) => <span key={k} className="text-[8px] bg-gray-100 text-gray-600 px-1.5 rounded font-bold">{k}: {String(v)}</span>)}
                                                                     {a.doctorName && <span className="text-[8px] bg-purple-50 text-purple-600 px-1.5 rounded font-bold">د. {a.doctorName}</span>}
+                                                                    {a.needsSchedule && <span className="text-[8px] bg-red-100 text-red-700 px-1.5 rounded font-black animate-pulse" title="المريض حجز يوم مفيهوش دكتور فاضي — كلّميه وظبطي الميعاد (أو اختاري دكتور من تعديل الحجز)">⚠️ الميعاد مش متظبط — كلّميه</span>}
+                                                                    {a.needsSchedule && currentUser.role !== 'doctor' && <button type="button" onClick={() => db.collection('appointments').doc(a.id).update({ needsSchedule: false, scheduledBy: currentUser.name, scheduledAt: new Date().toISOString() }).then(() => showToast('تمام — اتعلّم إنه اتظبط')).catch(e => showToast('مشكلة: ' + e.message))} className="text-[8px] bg-green-50 text-green-700 border border-green-200 px-1.5 rounded font-black">✓ اتظبط</button>}
                                                                 </div>
                                                             </div>
                                                         </div>
@@ -2606,7 +2610,7 @@
             const [tab, setTab] = useState('wa');
             const [dirty, setDirty] = useState(false);
             const WA = { consultReply: ['رد الاستشارة للمريض', '{name} {doctor} {reply}'], reminder: ['تذكير الموعد', '{name} {branch} {date} {time}'], review: ['طلب التقييم', '{name} {branch} {link}'], followup: ['متابعة المريض', '{name} {branch} {service}'], lab: ['رسالة المعمل', '{patient} {case} {date}'] };
-            const TG_L = { tgConsult: ['استشارة أونلاين جديدة', '{code} {patient} {phone} {branch} {topic} {doctor} {question}'], tgConsultReply: ['تم الرد على استشارة', '{code} {patient} {by} {reply}'], tgResched: ['تعديل ميعاد حجز', '{patient} {phone} {oldDate} {oldTime} {oldDoctor} {date} {time} {doctor} {branch} {by}'], tgApp: ['حجز جديد', '{patient} {date} {time} {service} {doctor} {branch} {by} | {count} = حجوزات نفس اليوم في الفرع، {countAll} = كل الفروع'], tgShortage: ['نقص جديد', '{item} {qty} {branch} {by} | {count} = نواقص الفرع، {countAll} = كل الفروع'], tgDue: ['فاتورة / مستحق جديد', '{party} {amount} {due} {branch} {by} | {sum} = إجمالي المستحق للفرع، {count} = عدد الفواتير، {sumAll} و{countAll} = كل الفروع'], tgLab: ['تذكير المعمل', '{days} {lab} {patient} {case} {branch}'], tgFollow: ['موعد متابعة مريض', '{patient} {service} {branch}'] , tgOnline: ['حجز أونلاين جديد', '{patient} {phone} {date} {time} {service} {doctor} {code} {branch} | {count} = حجوزات نفس اليوم في الفرع'], tgCancel: ['كنسل أو تأجيل', '{kind} {patient} {phone} {date} {time} {service} {doctor} {branch}'], tgDigest: ['ملخص الصبح اليومي', '{branch} {date} {today} {online} {tomorrow} {follow} {lab} {short}'] };
+            const TG_L = { tgConsult: ['استشارة أونلاين جديدة', '{code} {patient} {phone} {branch} {topic} {doctor} {question}'], tgConsultReply: ['تم الرد على استشارة', '{code} {patient} {by} {reply}'], tgResched: ['تعديل ميعاد حجز', '{patient} {phone} {oldDate} {oldTime} {oldDoctor} {date} {time} {doctor} {branch} {by}'], tgApp: ['حجز جديد', '{patient} {date} {time} {service} {doctor} {branch} {by} | {count} = حجوزات نفس اليوم في الفرع، {countAll} = كل الفروع'], tgShortage: ['نقص جديد', '{item} {qty} {branch} {by} | {count} = نواقص الفرع، {countAll} = كل الفروع'], tgDue: ['فاتورة / مستحق جديد', '{party} {amount} {due} {branch} {by} | {sum} = إجمالي المستحق للفرع، {count} = عدد الفواتير، {sumAll} و{countAll} = كل الفروع'], tgLab: ['تذكير المعمل', '{days} {lab} {patient} {case} {branch}'], tgFollow: ['موعد متابعة مريض', '{patient} {service} {branch}'] , tgOnline: ['حجز أونلاين جديد', '{patient} {phone} {date} {time} {service} {doctor} {code} {branch} | {count} = حجوزات نفس اليوم في الفرع'], tgUnsched: ['حجز أونلاين محتاج تظبيط ميعاد', '{patient} {phone} {date} {time} {service} {code} {branch}'], tgCancel: ['كنسل أو تأجيل', '{kind} {patient} {phone} {date} {time} {service} {doctor} {branch}'], tgDigest: ['ملخص الصبح اليومي', '{branch} {date} {today} {online} {tomorrow} {follow} {lab} {short}'] };
             // جدول الصبح: مجموعتين (كل مجموعة بتتحذف/تتسمّى مع بعض)
             const GROUPS = {
                 grpSched: ['جدول مواعيد الصبح (الإدارة / الفروع / الأدمنز)', [['tgSchedHead', 'أول الرسالة', '{branch} {date} {count} {canceled}'], ['tgSchedDoctor', 'عنوان كل دكتور', '{doctor} {count}'], ['tgSchedLine', 'سطر كل حجز', '{time} {patient} {service} {phone} {status} {online}'], ['tgSchedEmpty', 'لو مفيش حجوزات', '{branch} {date} {canceled}', 'branch', 'متبعتش جدول الفرع لو مفيهوش حجوزات']]],
@@ -3072,7 +3076,8 @@
                     col='appointments'; const doc = staff.find(s => s.id === f.docId.value);
                     if (doc && !doctorWorks(doc, f.bId.value, f.dt.value)) { showToast('د. ' + doc.name + ' مش متاح يوم ' + DAY_NAMES[dowOf(f.dt.value)] + ' (بييجي: ' + daysText((doc.schedule || {})[f.bId.value]) + ')'); return; }
  d={patientName:f.pName.value, phone:f.phone.value, date:f.dt.value, time:f.tm.value, service:f.service.value, branchId:f.bId.value, recordedBy:user.name, doctorId: doc ? doc.id : '', doctorName: doc ? doc.name : ''}; if(modal.mode!=='edit') d.status='unconfirmed';
-                    else if (d.date !== modal.data.date || d.time !== modal.data.time || d.doctorId !== (modal.data.doctorId || '')) Object.assign(d, { rescheduledAt: new Date().toISOString(), rescheduledBy: user.name, prevDate: modal.data.date || '', prevTime: modal.data.time || '', prevDoctorId: modal.data.doctorId || '', prevDoctorName: modal.data.doctorName || '' });
+                    if (modal.mode === 'edit' && modal.data.needsSchedule && doc) Object.assign(d, { needsSchedule: false, scheduledBy: user.name, scheduledAt: new Date().toISOString() });
+                    if (modal.mode !== 'edit') {} else if (d.date !== modal.data.date || d.time !== modal.data.time || d.doctorId !== (modal.data.doctorId || '')) Object.assign(d, { rescheduledAt: new Date().toISOString(), rescheduledBy: user.name, prevDate: modal.data.date || '', prevTime: modal.data.time || '', prevDoctorId: modal.data.doctorId || '', prevDoctorName: modal.data.doctorName || '' });
                 } else if(modal.type==='staff') {
                     col='staff_members';
                     if (f.jobTitle.value === 'طبيب') {
