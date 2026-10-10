@@ -665,6 +665,9 @@
             const [staffCodes, setStaffCodes] = useState({});
             const [authChecked, setAuthChecked] = useState(false);
             const [tgReady, setTgReady] = useState(0);
+            // شاشة تحميل لحد ما أول بيانات توصل (بدل الصفحة الفاضية)
+            const [loaded, setLoaded] = useState(false);
+            const [slow, setSlow] = useState(false);
             
             const [modal, setModal] = useState(null);
             const [confirmAction, setConfirmAction] = useState(null);
@@ -917,6 +920,10 @@
             useEffect(() => {
                 if (!isLoggedIn) return;
                 firstSnap.current = {};
+                setLoaded(false); setSlow(false);
+                const tSlow = setTimeout(() => setSlow(true), 8000);
+                const tGive = setTimeout(() => setLoaded(true), 25000);
+                const ready = () => { clearTimeout(tSlow); clearTimeout(tGive); setLoaded(true); };
                 const unsub1 = db.collection('branches').onSnapshot(
                     s => setData(d => ({...d, branches: s.docs.map(x => ({id: x.id, ...x.data()}))})),
                     err => console.error(err)
@@ -936,8 +943,8 @@
                     err => console.error(err)
                 );
                 const unsub4 = appsQ.onSnapshot(
-                    s => { notify('appointments', s); setData(d => ({...d, appointments: s.docs.map(x => ({id: x.id, ...x.data()}))})); },
-                    err => console.error(err)
+                    s => { notify('appointments', s); setData(d => ({...d, appointments: s.docs.map(x => ({id: x.id, ...x.data()}))})); ready(); },
+                    err => { console.error(err); ready(); }
                 );
                 const unsub5 = isDocU ? none() : db.collection('payments').onSnapshot(
                     s => setData(d => ({...d, payments: s.docs.map(x => ({id: x.id, ...x.data()}))})),
@@ -1097,6 +1104,15 @@
                 };
             }, [data, currentUser, selectedBranch]);
 
+            if (isLoggedIn && !loaded) return (
+                <div className="h-screen bg-[#050505] flex flex-col items-center justify-center gap-5 p-6 text-center">
+                    <img src="https://i.ibb.co/qLw7Tcqv/logo-Dr-shahenda-original.png" className="w-48 opacity-90" />
+                    <div className="w-10 h-10 border-4 border-gold-500/30 border-t-gold-500 rounded-full animate-spin"></div>
+                    <p className="text-gray-400 text-sm font-bold">جاري تحميل البيانات...</p>
+                    {slow && <div className="space-y-3"><p className="text-amber-400 text-xs font-bold">التحميل بياخد وقت — غالباً النت ضعيف.</p>
+                        <button type="button" onClick={() => window.location.reload()} className="bg-white/10 text-white px-4 py-2 rounded-xl text-xs font-black">إعادة المحاولة</button></div>}
+                </div>
+            );
             if (!isLoggedIn) return authChecked ? <LoginView onLogin={doLogin} /> : <div className="h-screen bg-[#050505] flex items-center justify-center text-gold-500 font-black">...</div>;
             const staffFull = data.staff.map(s => staffCodes[s.id] ? { ...s, username: staffCodes[s.id].username || '', password: staffCodes[s.id].password || '' } : s);
 
@@ -3143,8 +3159,29 @@
             );
         }
 
+        // لو حصل خطأ في الشاشة: بدل الصفحة البيضا بتظهر رسالة فيها الخطأ وزرار إعادة تحميل
+        class AppErrorBoundary extends React.Component {
+            constructor(p) { super(p); this.state = { err: null }; }
+            static getDerivedStateFromError(err) { return { err }; }
+            componentDidCatch(err, info) { console.error('App crash:', err, info && info.componentStack); }
+            render() {
+                if (!this.state.err) return this.props.children;
+                const msg = String((this.state.err && (this.state.err.stack || this.state.err.message)) || this.state.err).split('\n').slice(0, 3).join('\n');
+                return (
+                    <div className="h-screen bg-[#050505] flex items-center justify-center p-6 text-center">
+                        <div className="max-w-md w-full bg-[#111] border border-white/10 rounded-3xl p-6 space-y-4">
+                            <p className="text-white font-black">حصلت مشكلة في عرض الصفحة</p>
+                            <p className="text-gray-400 text-xs font-bold">صوّري الرسالة دي وابعتيها، وجربي إعادة التحميل.</p>
+                            <pre dir="ltr" className="text-left text-[10px] text-red-300 bg-black/60 rounded-xl p-3 whitespace-pre-wrap break-all max-h-40 overflow-auto">{msg}</pre>
+                            <div className="flex gap-2"><button type="button" onClick={() => window.location.reload()} className="flex-1 bg-gold-500 text-black py-2.5 rounded-xl font-black text-sm">إعادة تحميل</button>
+                                <button type="button" onClick={() => { try { auth.signOut(); } catch (e) {} setTimeout(() => window.location.reload(), 300); }} className="flex-1 bg-white/10 text-white py-2.5 rounded-xl font-black text-sm">خروج</button></div>
+                        </div>
+                    </div>
+                );
+            }
+        }
         const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<App />);
+        root.render(<AppErrorBoundary><App /></AppErrorBoundary>);
     </script>
 </body>
 </html>
