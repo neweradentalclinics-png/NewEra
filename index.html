@@ -1836,6 +1836,8 @@
                                                                 <div className="flex flex-wrap items-center gap-1.5">
                                                                     <span className="text-[9px] font-mono font-bold text-gray-500 tracking-wider" dir="ltr">{a.phone || 'بدون رقم'}</span>
                                                                     {a.service && <span className="text-[8px] bg-blue-50 text-blue-600 px-1.5 rounded font-bold">{a.service}</span>}
+                                                                    {a.estimate && <span className="text-[8px] bg-amber-50 text-amber-700 px-1.5 rounded font-bold">💳 {a.estimate}</span>}
+                                                                    {a.extra && Object.entries(a.extra).map(([k, v]) => <span key={k} className="text-[8px] bg-gray-100 text-gray-600 px-1.5 rounded font-bold">{k}: {String(v)}</span>)}
                                                                     {a.doctorName && <span className="text-[8px] bg-purple-50 text-purple-600 px-1.5 rounded font-bold">د. {a.doctorName}</span>}
                                                                 </div>
                                                             </div>
