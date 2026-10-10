@@ -193,61 +193,108 @@
         // السوبر أدمن يحطه من: الإعدادات → تيليجرام.
         // أنواع الإشعارات، وكل نوع بيروح للإدارة (الشات الرئيسي) و/أو لسكرتارية الفرع حسب الإعدادات
         const TG_KINDS = [
-            ['booking', 'حجز جديد من السيستم'], ['online', 'حجز أونلاين جديد (الموقع / صفحة الحجز)'], ['cancel', 'كنسل أو تأجيل'],
-            ['follow', 'موعد متابعة مريض'], ['lab', 'تذكير حالة معمل'], ['shortage', 'نقص جديد'], ['due', 'فاتورة / مستحق جديد'], ['digest', 'ملخص الصبح اليومي'], ['schedule', 'مواعيد النهاردة بالتفصيل لكل دكتور'], ['reschedule', 'تعديل ميعاد حجز']
+            ['booking', 'حجز جديد من السيستم'], ['online', 'حجز أونلاين جديد (الموقع / صفحة الحجز)'], ['cancel', 'كنسل أو تأجيل'], ['reschedule', 'تعديل ميعاد حجز'],
+            ['follow', 'موعد متابعة مريض'], ['lab', 'تذكير حالة معمل'], ['shortage', 'نقص جديد'], ['due', 'فاتورة / مستحق جديد'], ['digest', 'ملخص الصبح اليومي (أرقام)'], ['schedule', 'جدول مواعيد النهاردة']
         ];
-        const TG_DEFAULT_ROUTES = { main: ['booking', 'online', 'cancel', 'follow', 'lab', 'shortage', 'due', 'schedule', 'reschedule'], branch: ['booking', 'online', 'cancel', 'follow', 'lab', 'shortage', 'digest', 'reschedule'], doctor: ['booking', 'online', 'cancel', 'schedule', 'reschedule'] };
-        // الإشعارات اللي ينفع توصل للدكتور (اللي تخص حجوزاته هو بس)
-        const TG_DOCTOR_KINDS = ['booking', 'online', 'cancel', 'schedule', 'reschedule'];
+        const ALL_KINDS = TG_KINDS.map(k => k[0]);
+        const TG_DEFAULT_ROUTES = { main: ['booking', 'online', 'cancel', 'follow', 'lab', 'shortage', 'due', 'schedule', 'reschedule'], branch: ['booking', 'online', 'cancel', 'follow', 'lab', 'shortage', 'digest', 'reschedule'] };
+        // الافتراضي لكل شخص جديد في قايمة الأشخاص
+        const PERSON_DEFAULT = { doctor: ['booking', 'online', 'cancel', 'reschedule', 'schedule'], admin: ['booking', 'online', 'cancel', 'reschedule', 'follow', 'lab', 'shortage', 'due', 'schedule'] };
+        // الدكتور: الحاجات دي بتوصله لو تخصه هو بس (حجوزاته / مرضاه). الباقي بيوصله لو في فروعه
+        const DOCTOR_OWN_KINDS = ['booking', 'online', 'cancel', 'reschedule', 'follow'];
         // إشعارات جديدة بتتضاف للإعدادات المحفوظة قبلها بقيمتها الافتراضية
-        const mergeRoutes = (x) => { if (!x.routes) return TG_DEFAULT_ROUTES; const known = x.routesKnown || ['booking', 'online', 'cancel', 'follow', 'lab', 'shortage', 'due', 'digest']; const r = {}; ['main', 'branch'].forEach(sd => { r[sd] = [...(x.routes[sd] || []), ...TG_DEFAULT_ROUTES[sd].filter(k => !known.includes(k))]; }); r.doctor = [...(x.routes.doctor || TG_DEFAULT_ROUTES.doctor.filter(k => k !== 'reschedule')), ...TG_DEFAULT_ROUTES.doctor.filter(k => !known.includes(k) && !(x.routes.doctor || []).includes(k))]; return r; };
-        const TG = { token: '', main: '', branches: {}, doctors: {}, routes: TG_DEFAULT_ROUTES };
+        const mergeRoutes = (x) => { if (!x.routes) return TG_DEFAULT_ROUTES; const known = x.routesKnown || ['booking', 'online', 'cancel', 'follow', 'lab', 'shortage', 'due', 'digest']; const r = {}; ['main', 'branch'].forEach(sd => { r[sd] = [...(x.routes[sd] || []), ...TG_DEFAULT_ROUTES[sd].filter(k => !known.includes(k))]; }); return r; };
+        // الأشخاص (دكاترة / أدمنز / يدوي): { key: { chat, kinds, name?, manual? } } — key = رقم الموظف في السيستم، أو m_... لليدوي
+        const mergePeople = (x) => {
+            const p = { ...(x.people || {}) };
+            const oldDocKinds = (x.routes && x.routes.doctor) || PERSON_DEFAULT.doctor;
+            Object.entries(x.doctors || {}).forEach(([id, chat]) => { if (chat && !p[id]) p[id] = { chat, kinds: [...oldDocKinds] }; });
+            return p;
+        };
+        const TG = { token: '', main: '', branches: {}, people: {}, routes: TG_DEFAULT_ROUTES };
         const tgPost = (chat, text) => fetch(`https://api.telegram.org/bot${TG.token}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chat, text }) });
-        // branchId = الفرع اللي الإشعار يخصه، kind = نوع الإشعار، doctorId = الدكتور (لو الإشعار يخص حجز)
-        const tgSend = (text, branchId, kind, doctorId) => {
+        // مين من الأشخاص يستلم الإشعار ده
+        const personGets = (key, per, kind, branchId, doctorIds) => {
+            if (!per || !per.chat || !(per.kinds || []).includes(kind)) return false;
+            if (per.manual) return true;
+            const st = (LIVE.staff || []).find(s => s.id === key);
+            if (!st) return false; // الموظف اتشال من السيستم
+            if (st.role === 'admin' || st.role === 'superadmin') return true;
+            if (st.role === 'doctor') {
+                const ids = [].concat(doctorIds || []).filter(Boolean);
+                if (DOCTOR_OWN_KINDS.includes(kind)) return ids.includes(key);
+                return !branchId || doctorBranchIds(st, LIVE.branches).includes(branchId);
+            }
+            return false;
+        };
+        // branchId = الفرع اللي الإشعار يخصه، kind = نوع الإشعار، doctorIds = الدكتور/الدكاترة اللي يخصهم
+        const tgSend = (text, branchId, kind, doctorIds) => {
             if (!TG.token) return;
             const r = TG.routes || TG_DEFAULT_ROUTES, chats = [];
             if (TG.main && (r.main || []).includes(kind)) chats.push(TG.main);
             const bName = (LIVE.branches.find(b => b.id === branchId) || {}).name;
             const bc = TG.branches[branchId] || (bName && TG.branches[bName]);
             if (bc && (r.branch || []).includes(kind)) chats.push(bc);
-            if (kind !== 'schedule' && (r.doctor || []).includes(kind)) [].concat(doctorId || []).forEach(id => { if (id && TG.doctors[id]) chats.push(TG.doctors[id]); });
-            [...new Set(chats)].forEach(chat => tgPost(chat, text).catch(() => {}));
+            if (kind !== 'schedule') Object.entries(TG.people || {}).forEach(([k, per]) => { if (personGets(k, per, kind, branchId, doctorIds)) chats.push(per.chat); });
+            [...new Set(chats.map(String))].forEach(chat => tgPost(chat, text).catch(() => {}));
         };
-        // جدول مواعيد النهاردة لفرع: متقسم على الدكاترة، وبيتقسم لكذا رسالة لو طويل (حد تيليجرام 4096 حرف)
+        // ===== جدول المواعيد (القوالب بتتعدل من: قوالب الرسائل) =====
         const fmt12 = t => { if (!t) return '--'; const [h, m] = t.split(':').map(Number); return (h % 12 || 12) + ':' + String(m || 0).padStart(2, '0') + (h >= 12 ? ' م' : ' ص'); };
+        const APP_ST_TXT = { unconfirmed: '❓ مش مؤكد', booked: '❓ مش مؤكد', confirmed: '✅ مؤكد', on_way: '🚗 في الطريق', arrived: '🟢 حضر', done: '✔️ خلص', postponed: '⏸ مؤجل' };
+        // بعد ملء القالب: نشيل الفواصل اللي بقت فاضية (لو الخدمة أو الموبايل مش موجودين)
+        const tidy = s => s.replace(/[ \t]*[—\-|•:،][ \t]*\u0000/g, '').replace(/\u0000/g, '').split('\n').map(l => l.replace(/ {2,}/g, ' ').trimEnd()).join('\n');
+        const fillTidy = (k, v) => tidy(fillT(k, Object.fromEntries(Object.entries(v).map(([a, b]) => [a, (b === '' || b === null || b === undefined) ? '\u0000' : b]))));
+        const schedLine = (k, a) => fillTidy(k, { time: fmt12(a.time), patient: a.patientName || '', service: a.service || '', phone: a.phone || '', status: APP_ST_TXT[a.status || 'unconfirmed'] || '', online: a.source === 'online' ? '🌐' : '' });
+        const dayTxtOf = date => new Intl.DateTimeFormat('ar-EG', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date(date + 'T12:00:00'));
+        const packMsgs = (head, blocks) => { const out = []; let cur = head; blocks.forEach(bk => { if ((cur + '\n\n' + bk).length > 3800) { out.push(cur); cur = bk; } else cur += '\n\n' + bk; }); out.push(cur); return out; };
+        // جدول فرع: متقسم على الدكاترة
         const scheduleMessages = (branch, apps, date) => {
             const list = apps.filter(a => a.branchId === branch.id && a.date === date && a.status !== 'canceled').sort((a, b) => (a.time || '').localeCompare(b.time || ''));
             const canceled = apps.filter(a => a.branchId === branch.id && a.date === date && a.status === 'canceled').length;
-            const dayTxt = new Intl.DateTimeFormat('ar-EG', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date(date + 'T12:00:00'));
-            if (!list.length) return ['🗓️ فرع ' + branch.name + ' — ' + dayTxt + '\nمفيش حجوزات النهاردة.' + (canceled ? ' (' + canceled + ' اتكنسلوا)' : '')];
+            const base = { branch: branch.name, date: dayTxtOf(date), count: list.length, canceled: canceled ? '• ' + canceled + ' كنسل' : '' };
+            if (!list.length) return [fillTidy('tgSchedEmpty', base)];
             const groups = {};
             list.forEach(a => { const k = a.doctorName ? 'د. ' + a.doctorName : 'بدون دكتور'; (groups[k] = groups[k] || []).push(a); });
-            const st = a => { const k = (!a.status || a.status === 'booked') ? 'unconfirmed' : a.status; return ({ unconfirmed: '❓ مش مؤكد', confirmed: '✅ مؤكد', on_way: '🚗 في الطريق', arrived: '🟢 حضر', done: '✔️ خلص', postponed: '⏸ مؤجل' })[k] || ''; };
-            const head = '🗓️ مواعيد النهاردة — فرع ' + branch.name + '\n' + dayTxt + ' • ' + list.length + ' حجز' + (canceled ? ' • ' + canceled + ' كنسل' : '');
-            const blocks = Object.entries(groups).map(([doc, arr]) => '👨‍⚕️ ' + doc + ' (' + arr.length + ')\n' + arr.map(a => '• ' + fmt12(a.time) + ' — ' + a.patientName + (a.service ? ' — ' + a.service : '') + (a.phone ? ' — ' + a.phone : '') + ' ' + st(a) + (a.source === 'online' ? ' 🌐' : '')).join('\n'));
-            const out = []; let cur = head;
-            blocks.forEach(bk => { if ((cur + '\n\n' + bk).length > 3800) { out.push(cur); cur = bk; } else cur += '\n\n' + bk; });
-            out.push(cur);
-            return out;
+            return packMsgs(fillTidy('tgSchedHead', base), Object.entries(groups).map(([doc, arr]) => fillTidy('tgSchedDoctor', { doctor: doc, count: arr.length }) + '\n' + arr.map(a => schedLine('tgSchedLine', a)).join('\n')));
         };
         // جدول الدكتور نفسه: حجوزاته النهاردة في كل الفروع
         const doctorScheduleMessage = (docId, docName, branches, apps, date) => {
             const list = apps.filter(a => a.doctorId === docId && a.date === date && a.status !== 'canceled').sort((a, b) => (a.time || '').localeCompare(b.time || ''));
-            const dayTxt = new Intl.DateTimeFormat('ar-EG', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date(date + 'T12:00:00'));
-            if (!list.length) return '🗓️ د. ' + docName + ' — ' + dayTxt + '\nمفيش حجوزات ليك النهاردة.';
+            const base = { doctor: docName, date: dayTxtOf(date), count: list.length };
+            if (!list.length) return fillTidy('tgDocSchedEmpty', base);
             const byB = {};
             list.forEach(a => { const n = (branches.find(b => b.id === a.branchId) || {}).name || ''; (byB[n] = byB[n] || []).push(a); });
-            return ('🗓️ مواعيدك النهاردة يا د. ' + docName + '\n' + dayTxt + ' • ' + list.length + ' حجز\n\n' + Object.entries(byB).map(([n, arr]) => '🏥 فرع ' + n + '\n' + arr.map(a => '• ' + fmt12(a.time) + ' — ' + a.patientName + (a.service ? ' — ' + a.service : '') + (a.source === 'online' ? ' 🌐' : '')).join('\n')).join('\n\n')).slice(0, 4000);
+            return packMsgs(fillTidy('tgDocSchedHead', base), Object.entries(byB).map(([n, arr]) => '🏥 فرع ' + n + '\n' + arr.map(a => schedLine('tgDocSchedLine', a)).join('\n'))).join('\n\n').slice(0, 4000);
         };
-        const sendDoctorSchedules = (apps, branches, date, onlyIds) => {
-            if (!TG.token || !(TG.routes.doctor || []).includes('schedule')) return;
-            Object.entries(TG.doctors || {}).filter(([id, chat]) => chat && (!onlyIds || onlyIds.includes(id))).forEach(([id, chat], i) => {
-                const name = ((LIVE.staff || []).find(s => s.id === id) || {}).name || (apps.find(a => a.doctorId === id) || {}).doctorName || '';
-                setTimeout(() => tgPost(chat, doctorScheduleMessage(id, name, branches, apps, date)).catch(() => {}), i * 400);
+        // مين ياخد جدول النهاردة من الأشخاص: الدكتور = جدوله هو، الأدمن/اليدوي = جداول كل الفروع
+        const scheduleTargets = () => Object.entries(TG.people || {}).filter(([k, per]) => per && per.chat && (per.kinds || []).includes('schedule')).map(([k, per]) => {
+            const st = (LIVE.staff || []).find(s => s.id === k);
+            if (per.manual) return { key: k, per, type: 'admin' };
+            if (!st) return null;
+            return { key: k, per, type: st.role === 'doctor' ? 'doctor' : (st.role === 'admin' || st.role === 'superadmin') ? 'admin' : null, st };
+        }).filter(x => x && x.type);
+        const queueSend = (pairs) => pairs.reduce((p, [chat, m]) => p.then(() => tgPost(chat, m).catch(() => {})).then(() => new Promise(r => setTimeout(r, 400))), Promise.resolve());
+        // جدول فرع للشات الرئيسي وشات الفرع
+        const sendSchedules = (branches, apps, date) => {
+            if (!TG.token) return;
+            const r = TG.routes || TG_DEFAULT_ROUTES, pairs = [];
+            branches.forEach(b => {
+                const chats = [];
+                if (TG.main && (r.main || []).includes('schedule')) chats.push(TG.main);
+                const bc = TG.branches[b.id] || TG.branches[b.name];
+                if (bc && (r.branch || []).includes('schedule')) chats.push(bc);
+                const msgs = scheduleMessages(b, apps, date);
+                [...new Set(chats.map(String))].forEach(c => msgs.forEach(m => pairs.push([c, m])));
             });
+            return queueSend(pairs);
         };
-        const sendSchedules = (branches, apps, date) => branches.forEach(b => scheduleMessages(b, apps, date).reduce((p, m) => p.then(() => tgSend(m, b.id, 'schedule')).then(() => new Promise(r => setTimeout(r, 400))), Promise.resolve()));
+        // جدول لشخص واحد من القايمة
+        const sendPersonSchedule = (t, branches, apps, date) => {
+            if (!TG.token) return;
+            if (t.type === 'doctor') return queueSend([[t.per.chat, doctorScheduleMessage(t.key, t.st.name || '', branches, apps, date)]]);
+            const pairs = []; branches.forEach(b => scheduleMessages(b, apps, date).forEach(m => pairs.push([t.per.chat, m])));
+            return queueSend(pairs);
+        };
         let _ac;
         const pushLocal = (text) => {
             try { _ac = _ac || new (window.AudioContext || window.webkitAudioContext)(); const o = _ac.createOscillator(), g = _ac.createGain(); o.connect(g); g.connect(_ac.destination); o.frequency.value = 880; g.gain.value = 0.15; o.start(); o.stop(_ac.currentTime + 0.25); } catch (e) {}
@@ -271,6 +318,13 @@
             tgOnline: '🌐 حجز أونلاين جديد — فرع {branch}\nالمريض: {patient}\nالموبايل: {phone}\nالموعد: {date} {time}\nالخدمة: {service}\nالدكتور: {doctor}\nكود الحجز: {code}\n\n📊 إجمالي حجوزات {date} في {branch}: {count}',
             tgCancel: '❌ {kind} — فرع {branch}\nالمريض: {patient}\nالموبايل: {phone}\nالموعد كان: {date} {time}\nالخدمة: {service}\nالدكتور: {doctor}\n📞 اتسجل في سجل المرضى للمتابعة',
             tgResched: '🔄 تعديل ميعاد حجز — فرع {branch}\nالمريض: {patient}\nالموبايل: {phone}\nكان: {oldDate} {oldTime} — {oldDoctor}\nبقى: {date} {time} — {doctor}\nبواسطة: {by}',
+            tgSchedHead: '🗓️ مواعيد النهاردة — فرع {branch}\n{date} • {count} حجز {canceled}',
+            tgSchedDoctor: '👨‍⚕️ {doctor} ({count})',
+            tgSchedLine: '• {time} — {patient} — {service} — {phone} {status} {online}',
+            tgSchedEmpty: '🗓️ فرع {branch} — {date}\nمفيش حجوزات النهاردة. {canceled}',
+            tgDocSchedHead: '🗓️ مواعيدك النهاردة يا د. {doctor}\n{date} • {count} حجز',
+            tgDocSchedLine: '• {time} — {patient} — {service} {online}',
+            tgDocSchedEmpty: '🗓️ د. {doctor} — {date}\nمفيش حجوزات ليك النهاردة.',
             tgDigest: '☀️ صباح الخير — ملخص فرع {branch}\n{date}\n\n📅 حجوزات النهاردة: {today} (أونلاين: {online})\n❓ حجوزات بكرة لسه مش مؤكدة: {tomorrow}\n📞 متابعات مستحقة: {follow}\n⏰ حالات معمل محتاجة تتطلب: {lab}\n⚠️ نواقص مفتوحة: {short}'
         };
         const OLD_TG = {
@@ -692,10 +746,11 @@
                     db.runTransaction(async tx => { const sn = await tx.get(sref); if (sn.exists) return false; tx.set(sref, { at: Date.now() }); return true; })
                         .then(won => { if (won) sendSchedules([b], data.appointments, today); }).catch(() => {});
                 });
-                Object.keys(TG.doctors || {}).filter(id => TG.doctors[id]).forEach(id => {
-                    const dref = db.collection('tg_log').doc('docsched_' + id + '_' + today);
+                // جدول النهاردة لكل شخص في القايمة (الدكتور = جدوله، الأدمن = كل الفروع)
+                scheduleTargets().forEach(t => {
+                    const dref = db.collection('tg_log').doc('docsched_' + t.key + '_' + today);
                     db.runTransaction(async tx => { const sn = await tx.get(dref); if (sn.exists) return false; tx.set(dref, { at: Date.now() }); return true; })
-                        .then(won => { if (won) sendDoctorSchedules(data.appointments, data.branches, today, [id]); }).catch(() => {});
+                        .then(won => { if (won) sendPersonSchedule(t, data.branches, data.appointments, today); }).catch(() => {});
                 });
             }, [data.appointments, data.branches, currentUser, tgReady]);
 
@@ -735,7 +790,7 @@
                         if (!won) return;
                         const bn = data.branches.find(b => b.id === p.branchId)?.name || '';
                         const text = fillT('tgFollow', { patient: p.name, service: svcText(p), branch: bn });
-                        tgSend(text, p.branchId, 'follow');
+                        tgSend(text, p.branchId, 'follow', p.doctorId);
                     }).catch(() => {});
                 });
             }, [data.patients, currentUser]);
@@ -799,7 +854,7 @@
                 if (isDocU) { firstSnap.current.shortages = true; firstSnap.current.dues = true; }
                 const unsub10 = isDocU ? none() : db.collection('dues').onSnapshot(s => { notify('dues', s); setData(d => ({...d, dues: s.docs.map(x => ({id: x.id, ...x.data()}))})); }, err => console.error(err));
                 const unsub11 = db.collection('settings').doc('templates').onSnapshot(d => { if (d.exists) { const dd = { ...d.data() }; Object.keys(OLD_TG).forEach(k => { if (dd[k] === OLD_TG[k]) delete dd[k]; }); Object.assign(TPL, dd); setTplVer(v => v + 1); } }, err => console.error(err));
-                const unsub12 = db.collection('private_config').doc('telegram').onSnapshot(d => { const x = d.exists ? d.data() : {}; TG.token = x.token || ''; TG.main = x.main || ''; TG.branches = x.branches || {}; TG.doctors = x.doctors || {}; TG.routes = mergeRoutes(x); setTgReady(v => v + 1); }, err => console.error(err));
+                const unsub12 = db.collection('private_config').doc('telegram').onSnapshot(d => { const x = d.exists ? d.data() : {}; TG.token = x.token || ''; TG.main = x.main || ''; TG.branches = x.branches || {}; TG.people = mergePeople(x); TG.routes = mergeRoutes(x); setTgReady(v => v + 1); }, err => console.error(err));
                 return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); unsub6(); unsub7(); unsub8(); unsub10(); unsub11(); unsub12(); };
             }, [isLoggedIn]);
 
@@ -1061,7 +1116,7 @@
                             {activeTab === 'daily' && currentUser.role === 'employee' && <DailyView payments={data.payments} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'payment', mode:'add', data:{branchId:currentUser.branchId}})} onEdit={(d)=>setModal({type:'payment', mode:'edit', data:d})} showToast={setToastMsg} />}
                             {activeTab === 'finance' && isSuperAdmin && <FinanceView payments={filteredData.payments} branches={data.branches} selectedBranch={selectedBranch} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={(bId)=>setModal({type:'payment', mode:'add', data:{branchId:bId}})} onEdit={(d)=>setModal({type:'payment', mode:'edit', data:d})} showToast={setToastMsg} />}
                                                         {activeTab === 'labs' && <LabsView focusId={focus?.tab === 'labs' ? focus.id : null} cases={filteredData.labCases} costs={costs} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'lab', mode:'add'})} onEdit={(d)=>setModal({type:'lab', mode:'edit', data:d})} showToast={setToastMsg} />}
-                            {activeTab === 'settings' && isAdminOrSuper && <SettingsView sections={[{ k: 'branches', label: 'الفروع', node: <BranchesView branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'branch', mode:'add'})} onEdit={(d)=>setModal({type:'branch', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'templates', label: 'قوالب الرسائل', node: <TemplatesView showToast={setToastMsg} /> }, ...(isSuperAdmin ? [{ k: 'staff', label: 'الموظفين', node: <StaffView staff={staffFull} branches={data.branches} onConfirm={setConfirmAction} onAdd={(k)=>setModal({type:'staff', mode:'add', data:{kind:k}})} onEdit={(d)=>setModal({type:'staff', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'mycode', label: 'حسابي', node: <MasterCodeView currentUser={currentUser} showToast={setToastMsg} /> }, { k: 'telegram', label: 'تيليجرام', node: <TelegramView showToast={setToastMsg} branches={data.branches} doctors={data.staff.filter(x => x.role === 'doctor')} /> }] : [])]} />}
+                            {activeTab === 'settings' && isAdminOrSuper && <SettingsView sections={[{ k: 'branches', label: 'الفروع', node: <BranchesView branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'branch', mode:'add'})} onEdit={(d)=>setModal({type:'branch', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'templates', label: 'قوالب الرسائل', node: <TemplatesView showToast={setToastMsg} /> }, ...(isSuperAdmin ? [{ k: 'staff', label: 'الموظفين', node: <StaffView staff={staffFull} branches={data.branches} onConfirm={setConfirmAction} onAdd={(k)=>setModal({type:'staff', mode:'add', data:{kind:k}})} onEdit={(d)=>setModal({type:'staff', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'mycode', label: 'حسابي', node: <MasterCodeView currentUser={currentUser} showToast={setToastMsg} /> }, { k: 'backup', label: 'النسخ الاحتياطي', node: <BackupView showToast={setToastMsg} /> }, { k: 'telegram', label: 'تيليجرام', node: <TelegramView showToast={setToastMsg} branches={data.branches} staff={data.staff} /> }] : [])]} />}
                             {activeTab === 'dues' && !isDoctor && <DuesView focusIds={focus?.tab === 'dues' ? focus.ids : null} items={filteredData.dues} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'due', mode:'add'})} onEdit={(d)=>setModal({type:'due', mode:'edit', data:d})} showToast={setToastMsg} />}
                                                         {activeTab === 'consumables' && isAdminOrSuper && <ConsumablesView allItems={data.consumables} items={filteredData.consumables} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'consumable', mode:'add', data:{kind:'purchase'}})} onEdit={(d)=>setModal({type:'consumable', mode:'edit', data:d})} showToast={setToastMsg} />}
                             {activeTab === 'shortages' && !isDoctor && <ShortagesView focusIds={focus?.tab === 'shortages' ? focus.ids : null} onBuy={(it)=> !isAdminOrSuper ? setConfirmAction({msg:'هل تم توفير وشراء هذا الصنف؟', onConfirm:()=>db.collection('shortages').doc(it.id).delete().then(()=>setToastMsg('تم')).catch(err=>setToastMsg('مشكلة: '+err.message))}) : quickBuy(it)} shortages={filteredData.shortages} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onEdit={(d)=>setModal({type:'shortage', mode:'edit', data:d})} showToast={setToastMsg} />}
@@ -1071,7 +1126,87 @@
             );
         }
 
+        // ===== استرجاع حساب السوبر أدمن (بإيميل صاحبة الحساب في Firebase) =====
+        const OWNER_EMAIL = 'neweradentalclinics@gmail.com';
+        function RecoveryView({ onBack }) {
+            const [step, setStep] = useState('login');
+            const [msg, setMsg] = useState('');
+            const [busy, setBusy] = useState(false);
+            const [sups, setSups] = useState([]);
+            const [form, setForm] = useState({ id: '', username: '', password: '', confirm: '' });
+            const field = "w-full bg-black/80 border border-white/10 rounded-2xl px-4 py-3 text-sm font-bold text-white placeholder-gray-600 focus:border-gold-500 outline-none";
+            const load = async () => {
+                const sm = await db.collection('staff_members').where('role', '==', 'superadmin').get();
+                const codes = await Promise.all(sm.docs.map(d => db.collection('staff_codes').doc(d.id).get().catch(() => null)));
+                const list = sm.docs.map((d, i) => ({ id: d.id, ...d.data(), username: codes[i] && codes[i].exists ? codes[i].data().username : '' }));
+                setSups(list); setForm(f => ({ ...f, id: list[0] ? list[0].id : 'new', username: list[0] ? list[0].username : '' }));
+                setStep('reset');
+            };
+            const login = async (e) => {
+                e.preventDefault(); setMsg(''); setBusy(true);
+                try {
+                    const em = e.target.em.value.trim().toLowerCase();
+                    if (em !== OWNER_EMAIL) throw new Error('ده مش إيميل صاحبة الحساب');
+                    await auth.signInWithEmailAndPassword(em, e.target.pw.value);
+                    await load();
+                } catch (x) { setMsg(x.code === 'auth/too-many-requests' ? 'محاولات كتير — استني شوية' : x.code && x.code.startsWith('auth/') ? 'الإيميل أو الباسورد غلط' : x.message); try { await auth.signOut(); } catch (z) {} }
+                setBusy(false);
+            };
+            const resetMail = async (e) => {
+                setMsg('');
+                try { await auth.sendPasswordResetEmail(OWNER_EMAIL); setMsg('✓ اتبعت لينك تغيير الباسورد على ' + OWNER_EMAIL + ' — افتحي الإيميل (وشوفي الـ Spam).'); }
+                catch (x) { setMsg('مقدرناش نبعت اللينك: ' + x.message); }
+            };
+            const save = async (e) => {
+                e.preventDefault(); setMsg('');
+                const u = normUser(form.username);
+                if (!validUser(u)) { setMsg('اسم المستخدم من 3 لـ 40 حرف ومن غير مسافات'); return; }
+                if (!validPass(form.password)) { setMsg('كلمة السر 4 حروف على الأقل'); return; }
+                if (form.password !== form.confirm) { setMsg('تأكيد كلمة السر مش مطابق'); return; }
+                setBusy(true);
+                try {
+                    const cur = sups.find(x => x.id === form.id);
+                    if (cur) {
+                        const { username: _u, ...rest } = cur;
+                        await saveStaff(cur.id, { ...rest, role: 'superadmin', username: u, password: form.password }, { ...rest, authUid: cur.authUid, username: '', password: '' });
+                    } else {
+                        await saveStaff(db.collection('staff_members').doc().id, { name: 'Admin', role: 'superadmin', branchId: 'all', branchIds: [], jobTitle: 'سوبر أدمن', username: u, password: form.password }, null);
+                    }
+                    await auth.signOut();
+                    setStep('done');
+                } catch (x) { setMsg('مشكلة: ' + x.message); }
+                setBusy(false);
+            };
+            return (
+                <div className="h-screen bg-[#050505] flex items-center justify-center p-6 w-full overflow-y-auto">
+                    <div className="w-full max-w-md bg-[#111111] p-8 rounded-[32px] border border-white/5 shadow-2xl space-y-4 text-right">
+                        <h2 className="text-white font-black text-lg">استرجاع حساب السوبر أدمن</h2>
+                        {step === 'login' && <form onSubmit={login} className="space-y-3">
+                            <p className="text-gray-400 text-xs font-bold leading-relaxed">ادخلي بإيميل وباسورد صاحبة الحساب (نفس اللي بتدخلي بيهم لوحة تحكم الموقع)، وبعدها تحطي اسم مستخدم وكلمة سر جداد للسوبر أدمن.</p>
+                            <input name="em" type="email" dir="ltr" defaultValue={OWNER_EMAIL} className={field} required />
+                            <input name="pw" type="password" dir="ltr" placeholder="باسورد الإيميل" className={field} required />
+                            <button disabled={busy} className="w-full bg-gradient-to-r from-gold-600 to-gold-400 text-black font-black py-3 rounded-2xl disabled:opacity-50">{busy ? '...' : 'تأكيد'}</button>
+                            <button type="button" onClick={resetMail} className="text-xs font-bold text-gray-400 hover:text-gold-500">نسيتي باسورد الإيميل كمان؟ ابعتيلي لينك تغييره</button>
+                        </form>}
+                        {step === 'reset' && <form onSubmit={save} className="space-y-3">
+                            {sups.length > 1 && <select value={form.id} onChange={e => setForm({ ...form, id: e.target.value, username: (sups.find(x => x.id === e.target.value) || {}).username || '' })} className={field}>{sups.map(x => <option key={x.id} value={x.id}>{x.name} ({x.username || '—'})</option>)}</select>}
+                            {sups.length === 0 ? <p className="text-amber-400 text-xs font-bold">مفيش سوبر أدمن متسجل — هيتعمل واحد جديد.</p> : <p className="text-gray-400 text-xs font-bold">اسم المستخدم الحالي: <span dir="ltr" className="text-gold-500">{(sups.find(x => x.id === form.id) || {}).username || '—'}</span></p>}
+                            <input dir="ltr" autoCapitalize="none" placeholder="اسم المستخدم الجديد" value={form.username} onChange={e => setForm({ ...form, username: e.target.value })} className={field} />
+                            <input dir="ltr" type="password" placeholder="كلمة السر الجديدة" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} className={field} />
+                            <input dir="ltr" type="password" placeholder="تأكيد كلمة السر" value={form.confirm} onChange={e => setForm({ ...form, confirm: e.target.value })} className={field} />
+                            <button disabled={busy} className="w-full bg-gradient-to-r from-gold-600 to-gold-400 text-black font-black py-3 rounded-2xl disabled:opacity-50">{busy ? 'جاري الحفظ...' : 'حفظ'}</button>
+                        </form>}
+                        {step === 'done' && <div className="space-y-3"><p className="text-emerald-400 font-black text-sm">✓ اتغيّر. ادخلي باسم المستخدم وكلمة السر الجداد.</p>
+                            <button type="button" onClick={() => window.location.reload()} className="w-full bg-gradient-to-r from-gold-600 to-gold-400 text-black font-black py-3 rounded-2xl">رجوع لتسجيل الدخول</button></div>}
+                        {msg && <p className={`text-xs font-bold ${msg.startsWith('✓') ? 'text-emerald-400' : 'text-red-400'}`}>{msg}</p>}
+                        {step !== 'done' && <button type="button" onClick={() => { auth.signOut().catch(() => {}); onBack(); }} className="text-xs font-bold text-gray-500 hover:text-white">← رجوع</button>}
+                    </div>
+                </div>
+            );
+        }
+
         function LoginView({ onLogin }) {
+            const [recover, setRecover] = useState(false);
             const [user, setUser] = useState('');
             const [pass, setPass] = useState('');
             const [show, setShow] = useState(false);
@@ -1089,6 +1224,7 @@
                 if (!ok) { setErr('اسم المستخدم أو كلمة السر غلط'); setPass(''); passRef.current && passRef.current.focus(); }
             };
             const field = "w-full bg-black/80 border border-white/10 rounded-2xl px-4 py-3.5 text-base font-bold text-white placeholder-gray-600 focus:border-gold-500 outline-none transition-all shadow-inner";
+            if (recover) return <RecoveryView onBack={() => setRecover(false)} />;
 
             return (
                 <div className="h-screen bg-[#050505] flex items-center justify-center p-6 text-center w-full relative overflow-hidden">
@@ -1110,6 +1246,7 @@
                             تذكرني على الجهاز ده
                         </label>
                         <button type="submit" disabled={busy || !user.trim() || !pass} className="w-full bg-gradient-to-r from-gold-600 to-gold-400 text-black font-black py-4 rounded-2xl shadow-lg hover:scale-[1.02] transition-transform text-lg disabled:opacity-50 disabled:hover:scale-100">{busy ? 'جاري الدخول...' : 'تـسـجـيـل الـدخـول'}</button>
+                        <button type="button" onClick={() => setRecover(true)} className="mt-4 text-xs font-bold text-gray-500 hover:text-gold-500">نسيتي بيانات دخول السوبر أدمن؟</button>
                     </form>
                 </div>
             );
@@ -1738,8 +1875,78 @@
             );
         }
 
+        // ===== النسخ الاحتياطي (السوبر أدمن بس) =====
+        const BACKUP_COLS = ['branches', 'staff_members', 'staff_codes', 'staff_auth', 'public_doctors', 'patients', 'appointments', 'online_bookings', 'booked_slots', 'lab_cases', 'lab_costs', 'payments', 'shortages', 'consumables', 'dues', 'settings', 'private_config'];
+        const packVal = v => v instanceof firebase.firestore.Timestamp ? { __ts: v.toMillis() } : Array.isArray(v) ? v.map(packVal) : (v && typeof v === 'object') ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, packVal(x)])) : v;
+        const unpackVal = v => (v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === 1 && typeof v.__ts === 'number') ? firebase.firestore.Timestamp.fromMillis(v.__ts) : Array.isArray(v) ? v.map(unpackVal) : (v && typeof v === 'object') ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, unpackVal(x)])) : v;
+        function BackupView({ showToast }) {
+            const [busy, setBusy] = useState('');
+            const [last, setLast] = useState(() => { try { return localStorage.getItem('neLastBackup') || ''; } catch (e) { return ''; } });
+            const download = async () => {
+                setBusy('جاري تجميع البيانات...');
+                try {
+                    const out = { app: 'new-era-clinic', version: 1, at: new Date().toISOString(), collections: {} };
+                    for (const c of BACKUP_COLS) {
+                        setBusy('جاري تحميل ' + c + '...');
+                        const sn = await db.collection(c).get();
+                        out.collections[c] = Object.fromEntries(sn.docs.map(d => [d.id, packVal(d.data())]));
+                    }
+                    const n = Object.values(out.collections).reduce((t, x) => t + Object.keys(x).length, 0);
+                    const blob = new Blob([JSON.stringify(out)], { type: 'application/json' });
+                    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'new-era-backup-' + localDay() + '.json'; a.click();
+                    const stamp = new Date().toLocaleString('ar-EG'); setLast(stamp); try { localStorage.setItem('neLastBackup', stamp); } catch (e) {}
+                    showToast('اتنزلت نسخة فيها ' + n + ' سجل ✓');
+                } catch (e) { showToast('مشكلة في النسخة: ' + e.message); }
+                setBusy('');
+            };
+            const restore = async (file) => {
+                let j; try { j = JSON.parse(await file.text()); } catch (e) { showToast('الملف ده مش نسخة احتياطية'); return; }
+                if (!j || j.app !== 'new-era-clinic' || !j.collections) { showToast('الملف ده مش نسخة احتياطية من السيستم'); return; }
+                const n = Object.values(j.collections).reduce((t, x) => t + Object.keys(x || {}).length, 0);
+                const ans = prompt('هتسترجعي ' + n + ' سجل من نسخة ' + new Date(j.at).toLocaleString('ar-EG') + '.\n\nالسجلات اللي في النسخة هترجع زي ما كانت (ولو اتعدلت بعدها هيرجع القديم). السجلات الجديدة اللي اتعملت بعد النسخة مش هتتمسح.\n\nللتأكيد اكتبي كلمة: استرجاع');
+                if (ans !== 'استرجاع') return;
+                setBusy('جاري الاسترجاع...');
+                try {
+                    const writes = [];
+                    Object.entries(j.collections).forEach(([c, docs]) => { if (BACKUP_COLS.includes(c)) Object.entries(docs || {}).forEach(([id, data]) => writes.push([c, id, unpackVal(data)])); });
+                    for (let i = 0; i < writes.length; i += 400) {
+                        const b = db.batch();
+                        writes.slice(i, i + 400).forEach(([c, id, data]) => b.set(db.collection(c).doc(id), data));
+                        await b.commit();
+                        setBusy('جاري الاسترجاع... ' + Math.min(i + 400, writes.length) + ' / ' + writes.length);
+                    }
+                    showToast('اتسترجع ' + writes.length + ' سجل ✓');
+                } catch (e) { showToast('مشكلة في الاسترجاع: ' + e.message); }
+                setBusy('');
+            };
+            const card = "bg-white rounded-[20px] border border-gray-100 shadow-sm p-5 space-y-3";
+            return (
+                <div className="space-y-3 max-w-2xl">
+                    <div className={card}>
+                        <h4 className="font-black text-gray-800 text-sm">💾 نسخة احتياطية يدوي</h4>
+                        <p className="text-[11px] text-gray-500 font-bold leading-relaxed">بتنزّل ملف فيه كل بيانات السيستم: المرضى، الحجوزات، المعامل، الماليات، الموظفين وبيانات دخولهم، والإعدادات. احتفظي بيه في مكان آمن (فيه أسماء المستخدمين وكلمات السر).</p>
+                        <button type="button" disabled={!!busy} onClick={download} className="w-full bg-gray-900 text-white py-3 rounded-xl font-black text-sm disabled:opacity-50">⬇ تنزيل نسخة احتياطية دلوقتي</button>
+                        {last && <p className="text-[10px] text-gray-400 font-bold">آخر نسخة من الجهاز ده: {last}</p>}
+                    </div>
+                    <div className={card}>
+                        <h4 className="font-black text-gray-800 text-sm">☁️ نسخة تلقائية كل يوم</h4>
+                        <p className="text-[11px] text-gray-500 font-bold leading-relaxed">سكريبت جوجل (اللي بيبعت إشعارات تيليجرام) بيعمل نسخة كاملة كل يوم الساعة 3 الفجر ويحفظها في جوجل درايف في فولدر <b>"نسخ نيو إيرا الاحتياطية"</b>، ويحتفظ بآخر 30 نسخة. الملفات دي بتترجع من هنا برضه.</p>
+                    </div>
+                    <div className={card}>
+                        <h4 className="font-black text-gray-800 text-sm">♻️ استرجاع من نسخة</h4>
+                        <p className="text-[11px] text-gray-500 font-bold leading-relaxed">لو بيانات اتمسحت أو اتغيّرت بالغلط. اختاري ملف النسخة، وهيطلب منك تكتبي كلمة "استرجاع" للتأكيد.</p>
+                        <label className={`block w-full text-center bg-red-50 text-red-600 border border-red-100 py-3 rounded-xl font-black text-sm cursor-pointer ${busy ? 'opacity-50 pointer-events-none' : ''}`}>⬆ اختاري ملف النسخة<input type="file" accept="application/json" hidden onChange={e => { const f = e.target.files[0]; e.target.value = ''; if (f) restore(f); }} /></label>
+                    </div>
+                    {busy && <p className="text-xs font-black text-gold-600 animate-pulse">{busy}</p>}
+                </div>
+            );
+        }
+
         // إعدادات تيليجرام (السوبر أدمن بس) — بتتحفظ في مكان مقفول على الموظفين
-        function TelegramView({ showToast, branches = [], doctors = [] }) {
+        function TelegramView({ showToast, branches = [], staff = [] }) {
+            const doctors = staff.filter(x => x.role === 'doctor');
+            const admins = staff.filter(x => x.role === 'admin' || x.role === 'superadmin');
+            const [openP, setOpenP] = useState(null);
             const [v, setV] = useState(null);
             const [found, setFound] = useState(null);
             const [bot, setBot] = useState(null);
@@ -1758,15 +1965,17 @@
             }, [v && v.token]);
             useEffect(() => { db.collection('private_config').doc('telegram').get().then(d => {
                 const x = d.exists ? d.data() : {}, bx = x.branches || {};
-                setV({ token: x.token || '', main: x.main || '', branches: Object.fromEntries(branches.map(b => [b.id, bx[b.id] || bx[b.name] || ''])), doctors: { ...(x.doctors || {}) }, routes: mergeRoutes(x) });
+                setV({ token: x.token || '', main: x.main || '', branches: Object.fromEntries(branches.map(b => [b.id, bx[b.id] || bx[b.name] || ''])), people: mergePeople(x), routes: mergeRoutes(x) });
             }).catch(e => showToast(e.message)); }, []);
             if (!v) return <p className="text-xs font-bold text-gray-400">...</p>;
             const inp = "w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500";
             const card = "bg-white rounded-[20px] border border-gray-100 shadow-sm p-5 space-y-3";
             const save = () => {
                 const br = {}; Object.entries(v.branches).forEach(([k, c]) => { if (String(c).trim()) br[k] = String(c).trim(); });
-                const dr = {}; Object.entries(v.doctors || {}).forEach(([k, c]) => { if (String(c).trim()) dr[k] = String(c).trim(); });
-                db.collection('private_config').doc('telegram').set({ token: v.token.trim(), main: v.main.trim(), branches: br, doctors: dr, routes: v.routes, routesKnown: TG_KINDS.map(k => k[0]) })
+                const ids = new Set(staff.map(x => x.id)), pp = {};
+                // بنحفظ اللي ليه رقم شات بس، ومن اللي اتشالوا من السيستم بنشيلهم
+                Object.entries(v.people || {}).forEach(([k, per]) => { const chat = String(per.chat || '').trim(); if (!chat || (!per.manual && !ids.has(k))) return; pp[k] = { chat, kinds: per.kinds || [], ...(per.manual ? { manual: true, name: (per.name || '').trim() } : {}) }; });
+                db.collection('private_config').doc('telegram').set({ token: v.token.trim(), main: v.main.trim(), branches: br, people: pp, routes: v.routes, routesKnown: TG_KINDS.map(k => k[0]) })
                     .then(() => showToast('تم حفظ إعدادات تيليجرام')).catch(e => showToast(e.message));
             };
             const test = (chat, label, key) => {
@@ -1792,6 +2001,26 @@
                     setFound(Object.entries(m));
                 }).catch(e => setFound({ err: e.message }));
             };
+            const setPer = (k, patch) => setV(p => { const cur = (p.people || {})[k] || { chat: '', kinds: [...PERSON_DEFAULT[(staff.find(x => x.id === k) || {}).role === 'doctor' ? 'doctor' : 'admin']] }; return { ...p, people: { ...p.people, [k]: { ...cur, ...patch } } }; });
+            const PersonRow = ({ id, name, tag, type, manual }) => {
+                const per = (v.people || {})[id] || { chat: '', kinds: [...PERSON_DEFAULT[type]] };
+                const open = openP === id, kinds = per.kinds || [];
+                return (
+                    <div className={`border rounded-xl p-2.5 space-y-2 ${per.chat ? 'border-gold-200 bg-gold-50/30' : 'border-gray-100'}`}>
+                        <div className="flex items-center justify-between gap-2">
+                            {manual ? <input value={per.name || ''} onChange={e => setPer(id, { name: e.target.value, manual: true })} placeholder="الاسم" className="flex-1 min-w-0 p-2 bg-white border border-gray-100 rounded-lg text-xs font-black outline-none" />
+                                : <div className="min-w-0"><p className="text-xs font-black text-gray-800 truncate">{name}</p>{tag && <p className="text-[9px] font-bold text-gray-400 truncate">{tag}</p>}</div>}
+                            <button type="button" onClick={() => setOpenP(open ? null : id)} className="shrink-0 text-[10px] font-black text-gold-700 bg-white border border-gold-200 rounded-lg px-2 py-1">{kinds.length} إشعار {open ? '▲' : '▼'}</button>
+                        </div>
+                        <div className="flex gap-2"><input dir="ltr" value={per.chat || ''} onChange={e => setPer(id, { chat: e.target.value })} className={inp} placeholder="chat_id (من @myidbot)" />
+                            <button type="button" onClick={() => test(per.chat, manual ? (per.name || '') : name, 'p_' + id)} className="px-3 bg-gray-100 rounded-xl text-[10px] font-black shrink-0">تجربة</button>
+                            {manual && <button type="button" onClick={() => setV(p => { const pp = { ...p.people }; delete pp[id]; return { ...p, people: pp }; })} className="px-2 text-red-500 font-black shrink-0">✕</button>}</div>
+                        <Res k={'p_' + id} />
+                        {open && <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 pt-1">{TG_KINDS.map(([k, n]) => <label key={k} className="flex items-center gap-2 text-[11px] font-bold text-gray-700 cursor-pointer">
+                            <input type="checkbox" checked={kinds.includes(k)} onChange={() => setPer(id, { kinds: kinds.includes(k) ? kinds.filter(x => x !== k) : [...kinds, k] })} />{n}{type === 'doctor' && DOCTOR_OWN_KINDS.includes(k) ? <span className="text-[9px] text-gray-400">(بتاعته بس)</span> : ''}</label>)}</div>}
+                    </div>
+                );
+            };
             const togg = (side, k) => setV(p => { const cur = p.routes[side] || []; return { ...p, routes: { ...p.routes, [side]: cur.includes(k) ? cur.filter(x => x !== k) : [...cur, k] } }; });
             return (
                 <div className="space-y-3 max-w-2xl">
@@ -1815,7 +2044,7 @@
                         {found && found.err && /webhook/i.test(found.err) && <div className="text-[11px] font-bold text-gray-700 bg-amber-50 rounded-xl p-3 space-y-2 leading-relaxed">
                             <p>البوت ده متوصّل بخدمة تانية (Webhook) وهي اللي بتستلم رسايله، فالسيستم مش بيقدر يشوفها. <b>إرسال الإشعارات شغال عادي</b> — دي مشكلة في زرار "هات الشاتات" بس.</p>
                             {found.hook && <p>متوصّل بـ: <span dir="ltr" className="font-mono text-[10px] break-all">{found.hook}</span></p>}
-                            <p><b>حل 1 (من غير ما تلمسي حاجة):</b> كل سكرتيرة تفتح <a href="https://t.me/userinfobot" target="_blank" rel="noreferrer" className="text-blue-600 underline" dir="ltr">@userinfobot</a> وتدوس Start، هيرد عليها برقمها (Id) — تبعتهولك وتحطيه في خانة الفرع.</p>
+                            <p><b>حل 1 (من غير ما تلمسي حاجة):</b> كل سكرتيرة تفتح <a href="https://t.me/myidbot" target="_blank" rel="noreferrer" className="text-blue-600 underline" dir="ltr">@myidbot</a> وتدوس Start وتبعتله <b dir="ltr">/getid</b>، هيرد عليها برقمها — تبعتهولك وتحطيه في خانة الفرع.</p>
                             <p><b>حل 2:</b> لو الخدمة اللي فوق مش بتستخدميها (أو مش عارفاها)، افصليها والزرار هيشتغل:</p>
                             <button type="button" onClick={() => { if (!confirm('فصل الـ Webhook؟ أي خدمة تانية متوصلة بالبوت ده هتبطل تستلم رسايله.')) return; fetch(`https://api.telegram.org/bot${v.token.trim()}/deleteWebhook`).then(r => r.json()).then(j => { setFound(null); showToast(j.ok ? 'اتفصل ✓ — خلي السكرتيرة تبعت للبوت ودوسي "هات الشاتات"' : 'مشكلة: ' + j.description); }).catch(e => showToast(e.message)); }} className="bg-gray-900 text-white px-3 py-2 rounded-lg text-[11px] font-black">فصل الـ Webhook</button>
                         </div>}
@@ -1826,25 +2055,31 @@
                                 <p>• الرسايل اللي فاتت عليها أكتر من 24 ساعة مش بتظهر، فابعتي رسالة جديدة.</p>
                             </div> :
                             <div className="bg-gray-50 rounded-xl p-2 space-y-1">{found.map(([id, name]) => <div key={id} className="flex items-center justify-between gap-2 text-[11px] font-bold"><span className="truncate">{name}</span><span className="flex items-center gap-1 shrink-0"><span dir="ltr" className="font-mono text-gray-500">{id}</span>
-                                <select defaultValue="" onChange={e => { const t = e.target.value; if (!t) return; if (t === 'main') setV(p => ({ ...p, main: id })); else if (t.startsWith('doc:')) setV(p => ({ ...p, doctors: { ...p.doctors, [t.slice(4)]: id } })); else setV(p => ({ ...p, branches: { ...p.branches, [t]: id } })); e.target.value = ''; }} className="text-[10px] bg-white border rounded-lg p-1"><option value="">حطه لـ...</option><option value="main">الإدارة</option>{branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}{doctors.map(x => <option key={x.id} value={'doc:' + x.id}>د. {x.name}</option>)}</select></span></div>)}</div>)}
+                                <select defaultValue="" onChange={e => { const t = e.target.value; if (!t) return; if (t === 'main') setV(p => ({ ...p, main: id })); else if (t.startsWith('p:')) setPer(t.slice(2), { chat: id }); else setV(p => ({ ...p, branches: { ...p.branches, [t]: id } })); e.target.value = ''; }} className="text-[10px] bg-white border rounded-lg p-1"><option value="">حطه لـ...</option><option value="main">الإدارة</option>{branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}{[...admins, ...doctors].map(x => <option key={x.id} value={'p:' + x.id}>{x.role === 'doctor' ? 'د. ' : ''}{x.name}</option>)}</select></span></div>)}</div>)}
                     </div>
                     <div className={card}>
-                        <h4 className="font-black text-gray-800 text-sm">شات كل دكتور</h4>
-                        <p className="text-[10px] text-gray-400 font-bold leading-relaxed">الدكتور بيوصله حجوزاته هو بس (الجديدة والأونلاين والكنسل والتأجيل) وجدول مواعيده كل يوم الصبح. يفتح البوت ويدوس <b>Start</b>، وبعدين يجيب رقمه من <a href="https://t.me/userinfobot" target="_blank" rel="noreferrer" className="text-blue-600 underline" dir="ltr">@userinfobot</a> ويبعتهولك.</p>
+                        <h4 className="font-black text-gray-800 text-sm">👔 الأدمنز (رسايل شخصية)</h4>
+                        <p className="text-[10px] text-gray-400 font-bold leading-relaxed">غير شات الإدارة الرئيسي: كل أدمن يوصله على الخاص اللي تختاريه له من كل الفروع. القايمة بتتسحب من الموظفين المتسجلين، ولو أدمن اتشال من السيستم بيبطل يوصله حاجة لوحده. وتقدري تضيفي شخص يدوي (مش متسجل في السيستم).</p>
+                        {admins.map(x => <React.Fragment key={x.id}>{PersonRow({ id: (x.id), name: (x.name), tag: (x.role === 'superadmin' ? 'سوبر أدمن' : 'أدمن'), type: "admin" })}</React.Fragment>)}
+                        {Object.entries(v.people || {}).filter(([k, per]) => per.manual).map(([k, per]) => <React.Fragment key={k}>{PersonRow({ id: k, manual: true, type: "admin" })}</React.Fragment>)}
+                        <button type="button" onClick={() => { const k = 'm_' + Date.now(); setV(p => ({ ...p, people: { ...p.people, [k]: { manual: true, name: '', chat: '', kinds: [...PERSON_DEFAULT.admin] } } })); setOpenP(k); }} className="text-xs font-black text-gold-600">+ إضافة شخص يدوي</button>
+                    </div>
+                    <div className={card}>
+                        <h4 className="font-black text-gray-800 text-sm">👨‍⚕️ الدكاترة</h4>
+                        <p className="text-[10px] text-gray-400 font-bold leading-relaxed">الأسماء بتتسحب من الدكاترة المتسجلين حالياً. الحجوزات والكنسل والتعديل والمتابعات بتوصل للدكتور لو تخصه هو بس، والجدول = جدوله هو. المعامل والنواقص والفواتير والملخص بتوصله لو في فروعه.</p>
                         {doctors.length === 0 && <p className="text-[11px] font-bold text-gray-400">مفيش دكاترة متسجلين لسه.</p>}
-                        {doctors.map(x => <div key={x.id} className="space-y-1"><label className="text-[9px] font-black text-gray-500 block">د. {x.name}</label>
-                            <div className="flex gap-2"><input dir="ltr" value={(v.doctors || {})[x.id] || ''} onChange={e => setV({ ...v, doctors: { ...v.doctors, [x.id]: e.target.value } })} className={inp} placeholder="chat_id" /><button type="button" onClick={() => test((v.doctors || {})[x.id], 'د. ' + x.name, 'd_' + x.id)} className="px-3 bg-gray-100 rounded-xl text-[10px] font-black shrink-0">تجربة</button></div><Res k={'d_' + x.id} /></div>)}
+                        {doctors.map(x => <React.Fragment key={x.id}>{PersonRow({ id: (x.id), name: ('د. ' + x.name), tag: (doctorBranchIds(x, branches).map(id => (branches.find(b => b.id === id) || {}).name).filter(Boolean).join('، ')), type: "doctor" })}</React.Fragment>)}
+                        <p className="text-[10px] text-gray-500 font-bold bg-blue-50 rounded-xl p-2.5 leading-relaxed">إزاي ياخد رقمه: يفتح بوت العيادة ويدوس <b>Start</b> (لازم)، وبعدين يفتح <a href="https://t.me/myidbot" target="_blank" rel="noreferrer" className="text-blue-600 underline" dir="ltr">@myidbot</a> ويبعتله <b dir="ltr">/getid</b> ويبعتلك الرقم.</p>
                     </div>
                     <div className={card}>
                         <h4 className="font-black text-gray-800 text-sm">مين يوصله إيه</h4>
                         <p className="text-[10px] text-gray-400 font-bold">سكرتارية كل فرع بيوصلها اللي يخص فرعها بس.</p>
-                        <table className="w-full text-xs"><thead><tr className="text-[10px] text-gray-400"><th className="text-right p-1.5">الإشعار</th><th className="p-1.5">الإدارة</th><th className="p-1.5">سكرتارية الفرع</th><th className="p-1.5">الدكتور</th></tr></thead>
+                        <table className="w-full text-xs"><thead><tr className="text-[10px] text-gray-400"><th className="text-right p-1.5">الإشعار</th><th className="p-1.5">الإدارة</th><th className="p-1.5">سكرتارية الفرع</th></tr></thead>
                             <tbody className="divide-y divide-gray-50">{TG_KINDS.map(([k, n]) => <tr key={k}><td className="p-1.5 font-bold text-gray-700">{n}</td>
-                                {['main', 'branch'].map(side => <td key={side} className="p-1.5 text-center"><input type="checkbox" checked={(v.routes[side] || []).includes(k)} onChange={() => togg(side, k)} /></td>)}
-                                <td className="p-1.5 text-center">{TG_DOCTOR_KINDS.includes(k) ? <input type="checkbox" checked={(v.routes.doctor || []).includes(k)} onChange={() => togg('doctor', k)} /> : <span className="text-gray-300">—</span>}</td></tr>)}</tbody></table>
-                        <p className="text-[10px] text-gray-400 font-bold">"مواعيد النهاردة" للدكتور = جدوله هو بس في كل الفروع.</p>
+                                {['main', 'branch'].map(side => <td key={side} className="p-1.5 text-center"><input type="checkbox" checked={(v.routes[side] || []).includes(k)} onChange={() => togg(side, k)} /></td>)}</tr>)}</tbody></table>
+                        <p className="text-[10px] text-gray-400 font-bold">صلاحيات كل أدمن وكل دكتور بتتحدد من خانته فوق.</p>
                         <p className="text-[10px] text-gray-400 font-bold">نص كل رسالة بيتعدل من الإعدادات ← قوالب الرسائل. ملخص الصبح وجدول المواعيد بيتبعتوا مرة واحدة يومياً بعد 9 الصبح.</p>
-                        <button type="button" onClick={() => { if (!TG.token) { showToast('احفظي التوكن الأول'); return; } sendSchedules(LIVE.branches, LIVE.appointments, localDay()); sendDoctorSchedules(LIVE.appointments, LIVE.branches, localDay()); showToast('بيتبعت جدول النهاردة دلوقتي للي مختارين "مواعيد النهاردة"'); }} className="w-full bg-gray-900 text-white py-2.5 rounded-xl font-black text-xs">🗓️ ابعت جدول مواعيد النهاردة دلوقتي</button>
+                        <button type="button" onClick={() => { if (!TG.token) { showToast('احفظي التوكن الأول'); return; } sendSchedules(LIVE.branches, LIVE.appointments, localDay()); scheduleTargets().forEach(t => sendPersonSchedule(t, LIVE.branches, LIVE.appointments, localDay())); showToast('بيتبعت جدول النهاردة دلوقتي للي مختارين "مواعيد النهاردة"'); }} className="w-full bg-gray-900 text-white py-2.5 rounded-xl font-black text-xs">🗓️ ابعت جدول مواعيد النهاردة دلوقتي</button>
                     </div>
                     <button type="button" onClick={save} className="w-full bg-gold-500 text-white py-3 rounded-xl font-black text-sm">حفظ</button>
                 </div>
@@ -1891,6 +2126,15 @@
         function TemplatesView({ showToast }) {
             const [v, setV] = useState(() => ({ ...TPL }));
             const WA = { reminder: ['تذكير الموعد', '{name} {branch} {date} {time}'], review: ['طلب التقييم', '{name} {branch} {link}'], followup: ['متابعة المريض', '{name} {branch} {service}'], lab: ['رسالة المعمل', '{patient} {case} {date}'] };
+            const TG_SCHED = {
+                tgSchedHead: ['جدول الصبح (الإدارة/الفرع) — أول الرسالة', '{branch} {date} {count} {canceled}'],
+                tgSchedDoctor: ['جدول الصبح — عنوان كل دكتور', '{doctor} {count}'],
+                tgSchedLine: ['جدول الصبح — سطر كل حجز', '{time} {patient} {service} {phone} {status} {online}'],
+                tgSchedEmpty: ['جدول الصبح — لو مفيش حجوزات', '{branch} {date} {canceled}'],
+                tgDocSchedHead: ['جدول الدكتور — أول الرسالة', '{doctor} {date} {count}'],
+                tgDocSchedLine: ['جدول الدكتور — سطر كل حجز', '{time} {patient} {service} {phone} {status} {online}'],
+                tgDocSchedEmpty: ['جدول الدكتور — لو مفيش حجوزات', '{doctor} {date}']
+            };
             const TG_L = { tgResched: ['تعديل ميعاد حجز', '{patient} {phone} {oldDate} {oldTime} {oldDoctor} {date} {time} {doctor} {branch} {by}'], tgApp: ['حجز جديد', '{patient} {date} {time} {service} {doctor} {branch} {by} | {count} = حجوزات نفس اليوم في الفرع، {countAll} = كل الفروع'], tgShortage: ['نقص جديد', '{item} {qty} {branch} {by} | {count} = نواقص الفرع، {countAll} = كل الفروع'], tgDue: ['فاتورة / مستحق جديد', '{party} {amount} {due} {branch} {by} | {sum} = إجمالي المستحق للفرع، {count} = عدد الفواتير، {sumAll} و{countAll} = كل الفروع'], tgLab: ['تذكير المعمل', '{days} {lab} {patient} {case} {branch}'], tgFollow: ['موعد متابعة مريض', '{patient} {service} {branch}'] , tgOnline: ['حجز أونلاين جديد', '{patient} {phone} {date} {time} {service} {doctor} {code} {branch} | {count} = حجوزات نفس اليوم في الفرع'], tgCancel: ['كنسل أو تأجيل', '{kind} {patient} {phone} {date} {time} {service} {doctor} {branch}'], tgDigest: ['ملخص الصبح اليومي', '{branch} {date} {today} {online} {tomorrow} {follow} {lab} {short}'] };
             const save = () => db.collection('settings').doc('templates').set(v).then(() => showToast('تم حفظ الرسائل')).catch(e => showToast(e.message));
             const block = (obj) => Object.entries(obj).map(([k, [title, vars]]) => (
@@ -1908,6 +2152,9 @@
                     <h3 className="text-lg font-black text-gray-800 pt-2">رسائل تيليجرام (إشعارات الإدارة)</h3>
                     <p className="text-[10px] font-bold text-gray-400">دي الرسائل اللي بتوصلك على تيليجرام. {'{by}'} هو اسم اللي سجّل. لو مسحتي كلمة من الأقواس بتختفي من الرسالة.</p>
                     {block(TG_L)}
+                    <h3 className="text-lg font-black text-gray-800 pt-2">جدول مواعيد الصبح (تيليجرام)</h3>
+                    <p className="text-[10px] font-bold text-gray-400">الجدول بيتبني من 3 أجزاء: أول الرسالة، وعنوان لكل دكتور، وسطر لكل حجز. لو خانة فاضية (زي الخدمة) الفاصل اللي قبلها بيختفي لوحده.</p>
+                    {block(TG_SCHED)}
                     <button type="button" onClick={save} className="w-full bg-gold-500 text-white py-3 rounded-xl font-black text-sm shadow-md">حفظ الرسائل</button>
                 </div>
             );
