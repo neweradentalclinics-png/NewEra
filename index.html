@@ -1121,11 +1121,11 @@
             const isDoctor = currentUser.role === 'doctor';
             const todayS = new Date().toISOString().split('T')[0];
             const inScope = x => currentUser.role === 'admin' || currentUser.role === 'superadmin' || x.branchId === currentUser.branchId;
+            const labPhoneAll = Object.fromEntries(data.labCases.filter(x => x.labPhone).sort((a, b) => (a.sentDate || '').localeCompare(b.sentDate || '')).map(x => [x.labName, x.labPhone]));
             const dueNotifs = currentUser.role !== 'employee' ? [] : [
                 ...data.patients.filter(p => p.followUpDate && !p.followedAt && p.followUpDate <= todayS && inScope(p)).map(p => ({ id: 'p' + p.id, kind: 'patient', refId: p.id, tab: 'patients', text: '📞 متابعة: ' + p.name + (svcText(p) ? ' — ' + svcText(p) : ''), ts: new Date(p.followUpDate).getTime(), wa: waUrl(p.phone, fillT('followup', { name: p.name, branch: bLabel(data.branches, p.branchId), service: svcText(p) })), itemName: p.name, branchId: p.branchId })),
                 ...data.labCases.filter(c => labDue(c) && inScope(c)).map(c => ({ id: 'l' + c.id, kind: 'lab', refId: c.id, tab: 'labs', text: '⏰ اطلبي من ' + c.labName + ': ' + c.patientName, ts: new Date(c.sentDate).getTime() + labRemindDays(c) * 864e5, wa: waLink(c, labPhoneAll[c.labName]), itemName: c.patientName, branchId: c.branchId }))
             ];
-            const labPhoneAll = Object.fromEntries(data.labCases.filter(x => x.labPhone).sort((a, b) => (a.sentDate || '').localeCompare(b.sentDate || '')).map(x => [x.labName, x.labPhone]));
             const reviewRows = (currentUser.role !== 'employee' || !tplOn('review')) ? [] : data.appointments
                 .filter(a => a.branchId === currentUser.branchId && (a.status === 'arrived' || a.status === 'done') && !a.reviewSent && !a.reviewSkipped && a.date <= todayS && a.date >= addDays(-3))
                 .sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')))
