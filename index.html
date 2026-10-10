@@ -211,7 +211,9 @@
             Object.entries(x.doctors || {}).forEach(([id, chat]) => { if (chat && !p[id]) p[id] = { chat, kinds: [...oldDocKinds] }; });
             return p;
         };
-        const TG = { token: '', main: '', branches: {}, people: {}, routes: TG_DEFAULT_ROUTES };
+        // off = أنواع رسايل موقّفة للكل، quiet = { branch: متبعتش جدول فرع فاضي، doctor: متبعتش جدول دكتور فاضي }
+        const TG = { token: '', main: '', branches: {}, people: {}, routes: TG_DEFAULT_ROUTES, off: [], quiet: {} };
+        const tgOn = kind => !(TG.off || []).includes(kind);
         const tgPost = (chat, text) => fetch(`https://api.telegram.org/bot${TG.token}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chat, text }) });
         // مين من الأشخاص يستلم الإشعار ده
         const personGets = (key, per, kind, branchId, doctorIds) => {
@@ -229,7 +231,7 @@
         };
         // branchId = الفرع اللي الإشعار يخصه، kind = نوع الإشعار، doctorIds = الدكتور/الدكاترة اللي يخصهم
         const tgSend = (text, branchId, kind, doctorIds) => {
-            if (!TG.token) return;
+            if (!TG.token || !tgOn(kind)) return;
             const r = TG.routes || TG_DEFAULT_ROUTES, chats = [];
             if (TG.main && (r.main || []).includes(kind)) chats.push(TG.main);
             const bName = (LIVE.branches.find(b => b.id === branchId) || {}).name;
@@ -275,14 +277,16 @@
         }).filter(x => x && x.type);
         const queueSend = (pairs) => pairs.reduce((p, [chat, m]) => p.then(() => tgPost(chat, m).catch(() => {})).then(() => new Promise(r => setTimeout(r, 400))), Promise.resolve());
         // جدول فرع للشات الرئيسي وشات الفرع
+        const hasSched = (pred, apps, date) => apps.some(a => pred(a) && a.date === date && a.status !== 'canceled');
         const sendSchedules = (branches, apps, date) => {
-            if (!TG.token) return;
+            if (!TG.token || !tgOn('schedule')) return;
             const r = TG.routes || TG_DEFAULT_ROUTES, pairs = [];
             branches.forEach(b => {
                 const chats = [];
                 if (TG.main && (r.main || []).includes('schedule')) chats.push(TG.main);
                 const bc = TG.branches[b.id] || TG.branches[b.name];
                 if (bc && (r.branch || []).includes('schedule')) chats.push(bc);
+                if (TG.quiet.branch && !hasSched(a => a.branchId === b.id, apps, date)) return;
                 const msgs = scheduleMessages(b, apps, date);
                 [...new Set(chats.map(String))].forEach(c => msgs.forEach(m => pairs.push([c, m])));
             });
@@ -290,11 +294,81 @@
         };
         // جدول لشخص واحد من القايمة
         const sendPersonSchedule = (t, branches, apps, date) => {
-            if (!TG.token) return;
-            if (t.type === 'doctor') return queueSend([[t.per.chat, doctorScheduleMessage(t.key, t.st.name || '', branches, apps, date)]]);
-            const pairs = []; branches.forEach(b => scheduleMessages(b, apps, date).forEach(m => pairs.push([t.per.chat, m])));
+            if (!TG.token || !tgOn('schedule')) return;
+            if (t.type === 'doctor') {
+                if (TG.quiet.doctor && !hasSched(a => a.doctorId === t.key, apps, date)) return;
+                return queueSend([[t.per.chat, doctorScheduleMessage(t.key, t.st.name || '', branches, apps, date)]]);
+            }
+            const pairs = []; branches.filter(b => !TG.quiet.branch || hasSched(a => a.branchId === b.id, apps, date)).forEach(b => scheduleMessages(b, apps, date).forEach(m => pairs.push([t.per.chat, m])));
             return queueSend(pairs);
         };
+        // ===== رسايل مخصصة (بيعملها الأدمن من غير أكواد) =====
+        const CM_VARS = [
+            ['الدكتور', 'اسم الدكتور'], ['الفرع', 'اسم الفرع'], ['التاريخ', 'تاريخ النهاردة'],
+            ['حجوزات_النهاردة', 'عدد حجوزات النهاردة'], ['حجوزات_بكرة', 'عدد حجوزات بكرة'], ['غير_مؤكد_بكرة', 'حجوزات بكرة مش مؤكدة'],
+            ['أونلاين_النهاردة', 'حجوزات أونلاين النهاردة'], ['كنسل_النهاردة', 'كنسل النهاردة'],
+            ['متابعات_مستحقة', 'متابعات مستحقة'], ['معامل_متأخرة', 'حالات معمل متأخرة'], ['نواقص', 'نواقص مفتوحة']
+        ];
+        const CM_COUNT_VARS = CM_VARS.slice(3).map(v => v[0]);
+        const CM_TO = [['main', 'شات الإدارة الرئيسي'], ['branches', 'سكرتارية كل فرع'], ['admins', 'الأدمنز (رسايل شخصية)'], ['doctors', 'كل دكتور']];
+        const CM_DAYS = [[6, 'السبت'], [0, 'الأحد'], [1, 'الإثنين'], [2, 'الثلاثاء'], [3, 'الأربعاء'], [4, 'الخميس'], [5, 'الجمعة']];
+        const CM_WINDOW_MIN = 180; // لو الرسالة فاتت ميعادها بأكتر من 3 ساعات (مفيش جهاز ولا سكريبت كان شغال) مش بتتبعت
+        // مين هيستلم: [{ chat, label, kind, doctorId, branchIds }]
+        const cmRecipients = (m, ctx) => {
+            const allB = ctx.branches.map(b => b.id);
+            const scope = (m.branchIds && m.branchIds.length) ? m.branchIds.filter(id => allB.includes(id)) : allB;
+            const out = [], to = m.to || {};
+            if (to.main && ctx.tg.main) out.push({ chat: ctx.tg.main, label: 'شات الإدارة', kind: 'main', branchIds: scope });
+            if (to.branches) scope.forEach(id => { const b = ctx.branches.find(x => x.id === id); const c = ctx.tg.branches[id] || (b && ctx.tg.branches[b.name]); if (c) out.push({ chat: c, label: 'سكرتارية ' + (b ? b.name : ''), kind: 'branch', branchIds: [id] }); });
+            Object.entries(ctx.tg.people || {}).forEach(([k, per]) => {
+                if (!per || !per.chat) return;
+                const st = ctx.staff.find(s => s.id === k);
+                if (to.admins && (per.manual || (st && (st.role === 'admin' || st.role === 'superadmin')))) out.push({ chat: per.chat, label: per.manual ? (per.name || 'يدوي') : st.name, kind: 'admin', branchIds: scope });
+                if (to.doctors && st && st.role === 'doctor') { const br = doctorBranchIds(st, ctx.branches).filter(id => scope.includes(id)); if (br.length) out.push({ chat: per.chat, label: 'د. ' + st.name, kind: 'doctor', doctorId: k, name: st.name, branchIds: br }); }
+            });
+            const seen = new Set();
+            return out.filter(r => { const k = String(r.chat); if (seen.has(k)) return false; seen.add(k); return true; });
+        };
+        const cmValues = (r, ctx) => {
+            const inB = x => r.branchIds.includes(x.branchId), mine = x => inB(x) && (!r.doctorId || x.doctorId === r.doctorId);
+            const live = a => a.status !== 'canceled';
+            const ap = ctx.apps.filter(mine);
+            return {
+                'الدكتور': r.name || '', 'الفرع': r.branchIds.map(id => (ctx.branches.find(b => b.id === id) || {}).name).filter(Boolean).join('، '),
+                'التاريخ': new Intl.DateTimeFormat('ar-EG', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date(ctx.today + 'T12:00:00')),
+                'حجوزات_النهاردة': ap.filter(a => a.date === ctx.today && live(a)).length,
+                'حجوزات_بكرة': ap.filter(a => a.date === ctx.tomorrow && live(a)).length,
+                'غير_مؤكد_بكرة': ap.filter(a => a.date === ctx.tomorrow && (!a.status || a.status === 'unconfirmed' || a.status === 'booked')).length,
+                'أونلاين_النهاردة': ap.filter(a => a.date === ctx.today && live(a) && a.source === 'online').length,
+                'كنسل_النهاردة': ap.filter(a => a.date === ctx.today && a.status === 'canceled').length,
+                'متابعات_مستحقة': ctx.patients.filter(p => mine(p) && p.followUpDate && !p.followedAt && p.followUpDate <= ctx.today).length,
+                'معامل_متأخرة': ctx.labs.filter(c => inB(c) && labDue(c)).length,
+                'نواقص': ctx.shortages.filter(inB).length
+            };
+        };
+        const cmRender = (text, vals) => String(text || '').replace(/\{([^{}]+)\}/g, (all, k) => { k = k.trim().replace(/\s+/g, '_'); return vals[k] === undefined ? all : String(vals[k]); });
+        // الرسايل الجاهزة للإرسال (بعد تخطي اللي قيمتها صفر لو الأدمن طلب كده)
+        const cmBuild = (m, ctx) => cmRecipients(m, ctx).map(r => { const vals = cmValues(r, ctx); return { r, vals, text: cmRender(m.text, vals) }; })
+            .filter(x => !(m.skipZero && CM_COUNT_VARS.includes(m.skipZero) && !Number(x.vals[m.skipZero])));
+        const cmDue = (m, now) => {
+            if (!m || !m.on || !String(m.text || '').trim() || !m.time) return false;
+            const day = now.toLocaleDateString('en-CA');
+            if (m.when === 'weekly' && !(m.days || []).includes(now.getDay())) return false;
+            if (m.when === 'once' && m.date !== day) return false;
+            const [h, mi] = m.time.split(':').map(Number), mins = now.getHours() * 60 + now.getMinutes(), at = h * 60 + (mi || 0);
+            return mins >= at && mins < at + CM_WINDOW_MIN;
+        };
+        // الشرح بالكلام العادي (الترجمة)
+        const cmExplain = (m, branches) => {
+            const t = m.time ? fmt12(m.time) : '؟';
+            const when = m.when === 'weekly' ? 'كل ' + (CM_DAYS.filter(([d]) => (m.days || []).includes(d)).map(x => x[1]).join(' و') || '؟') + ' الساعة ' + t
+                : m.when === 'once' ? 'مرة واحدة يوم ' + (m.date || '؟') + ' الساعة ' + t : 'كل يوم الساعة ' + t;
+            const to = CM_TO.filter(([k]) => (m.to || {})[k]).map(x => x[1]).join(' + ') || 'محدش (اختاري مين يستلم)';
+            const br = (m.branchIds && m.branchIds.length) ? 'فروع: ' + m.branchIds.map(id => (branches.find(b => b.id === id) || {}).name).filter(Boolean).join('، ') : 'كل الفروع';
+            const skip = m.skipZero ? ' • ومتتبعتش للي ' + ((CM_VARS.find(v => v[0] === m.skipZero) || [])[1] || '') + ' عنده = صفر' : '';
+            return when + ' ← هتتبعت لـ: ' + to + ' (' + br + ')' + skip;
+        };
+        const cmSendAll = (items) => queueSend(items.map(x => [x.r.chat, x.text]));
         let _ac;
         const pushLocal = (text) => {
             try { _ac = _ac || new (window.AudioContext || window.webkitAudioContext)(); const o = _ac.createOscillator(), g = _ac.createGain(); o.connect(g); g.connect(_ac.destination); o.frequency.value = 880; g.gain.value = 0.15; o.start(); o.stop(_ac.currentTime + 0.25); } catch (e) {}
@@ -754,6 +828,31 @@
                 });
             }, [data.appointments, data.branches, currentUser, tgReady]);
 
+            // الرسايل المخصصة: بنشيك كل دقيقة لو فيه رسالة جه ميعادها (مرة واحدة لكل رسالة في اليوم)
+            const [customMsgs, setCustomMsgs] = useState([]);
+            const dataRef = useRef(data); dataRef.current = data;
+            useEffect(() => {
+                if (!isLoggedIn || !currentUser || currentUser.role === 'doctor') return;
+                return db.collection('private_config').doc('custom_msgs').onSnapshot(d => setCustomMsgs((d.exists && d.data().list) || []), () => {});
+            }, [isLoggedIn, currentUser]);
+            useEffect(() => {
+                if (!currentUser || currentUser.role === 'doctor' || !customMsgs.length) return;
+                const run = () => {
+                    if (!TG.token || !firstSnap.current.appointments) return;
+                    const now = new Date(), today = localDay();
+                    customMsgs.filter(m => cmDue(m, now)).forEach(m => {
+                        const ref = db.collection('tg_log').doc('custom_' + m.id + '_' + today);
+                        db.runTransaction(async tx => { const sn = await tx.get(ref); if (sn.exists) return false; tx.set(ref, { at: Date.now() }); return true; }).then(won => {
+                            if (!won) return;
+                            const D = dataRef.current;
+                            cmSendAll(cmBuild(m, { branches: D.branches, staff: D.staff, apps: D.appointments, patients: D.patients, labs: D.labCases, shortages: D.shortages, today, tomorrow: dayShift(today, 1), tg: TG }));
+                        }).catch(() => {});
+                    });
+                };
+                run(); const t = setInterval(run, 60000);
+                return () => clearInterval(t);
+            }, [customMsgs, currentUser, tgReady]);
+
             // تذكير المعمل بعد المدة المحددة لكل حالة (يظهر + تيليجرام مرة واحدة لكل حالة)
             useEffect(() => {
                 if (!currentUser || currentUser.role === 'doctor') return;
@@ -854,7 +953,7 @@
                 if (isDocU) { firstSnap.current.shortages = true; firstSnap.current.dues = true; }
                 const unsub10 = isDocU ? none() : db.collection('dues').onSnapshot(s => { notify('dues', s); setData(d => ({...d, dues: s.docs.map(x => ({id: x.id, ...x.data()}))})); }, err => console.error(err));
                 const unsub11 = db.collection('settings').doc('templates').onSnapshot(d => { if (d.exists) { const dd = { ...d.data() }; Object.keys(OLD_TG).forEach(k => { if (dd[k] === OLD_TG[k]) delete dd[k]; }); Object.assign(TPL, dd); setTplVer(v => v + 1); } }, err => console.error(err));
-                const unsub12 = db.collection('private_config').doc('telegram').onSnapshot(d => { const x = d.exists ? d.data() : {}; TG.token = x.token || ''; TG.main = x.main || ''; TG.branches = x.branches || {}; TG.people = mergePeople(x); TG.routes = mergeRoutes(x); setTgReady(v => v + 1); }, err => console.error(err));
+                const unsub12 = db.collection('private_config').doc('telegram').onSnapshot(d => { const x = d.exists ? d.data() : {}; TG.token = x.token || ''; TG.main = x.main || ''; TG.branches = x.branches || {}; TG.people = mergePeople(x); TG.routes = mergeRoutes(x); TG.off = x.off || []; TG.quiet = x.quiet || {}; setTgReady(v => v + 1); }, err => console.error(err));
                 return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); unsub6(); unsub7(); unsub8(); unsub10(); unsub11(); unsub12(); };
             }, [isLoggedIn]);
 
@@ -1116,7 +1215,7 @@
                             {activeTab === 'daily' && currentUser.role === 'employee' && <DailyView payments={data.payments} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'payment', mode:'add', data:{branchId:currentUser.branchId}})} onEdit={(d)=>setModal({type:'payment', mode:'edit', data:d})} showToast={setToastMsg} />}
                             {activeTab === 'finance' && isSuperAdmin && <FinanceView payments={filteredData.payments} branches={data.branches} selectedBranch={selectedBranch} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={(bId)=>setModal({type:'payment', mode:'add', data:{branchId:bId}})} onEdit={(d)=>setModal({type:'payment', mode:'edit', data:d})} showToast={setToastMsg} />}
                                                         {activeTab === 'labs' && <LabsView focusId={focus?.tab === 'labs' ? focus.id : null} cases={filteredData.labCases} costs={costs} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'lab', mode:'add'})} onEdit={(d)=>setModal({type:'lab', mode:'edit', data:d})} showToast={setToastMsg} />}
-                            {activeTab === 'settings' && isAdminOrSuper && <SettingsView sections={[{ k: 'branches', label: 'الفروع', node: <BranchesView branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'branch', mode:'add'})} onEdit={(d)=>setModal({type:'branch', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'templates', label: 'قوالب الرسائل', node: <TemplatesView showToast={setToastMsg} /> }, ...(isSuperAdmin ? [{ k: 'staff', label: 'الموظفين', node: <StaffView staff={staffFull} branches={data.branches} onConfirm={setConfirmAction} onAdd={(k)=>setModal({type:'staff', mode:'add', data:{kind:k}})} onEdit={(d)=>setModal({type:'staff', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'mycode', label: 'حسابي', node: <MasterCodeView currentUser={currentUser} showToast={setToastMsg} /> }, { k: 'backup', label: 'النسخ الاحتياطي', node: <BackupView showToast={setToastMsg} /> }, { k: 'telegram', label: 'تيليجرام', node: <TelegramView showToast={setToastMsg} branches={data.branches} staff={data.staff} /> }] : [])]} />}
+                            {activeTab === 'settings' && isAdminOrSuper && <SettingsView sections={[{ k: 'branches', label: 'الفروع', node: <BranchesView branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'branch', mode:'add'})} onEdit={(d)=>setModal({type:'branch', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'templates', label: 'قوالب الرسائل', node: <TemplatesView showToast={setToastMsg} /> }, ...(isSuperAdmin ? [{ k: 'staff', label: 'الموظفين', node: <StaffView staff={staffFull} branches={data.branches} onConfirm={setConfirmAction} onAdd={(k)=>setModal({type:'staff', mode:'add', data:{kind:k}})} onEdit={(d)=>setModal({type:'staff', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'mycode', label: 'حسابي', node: <MasterCodeView currentUser={currentUser} showToast={setToastMsg} /> }, { k: 'backup', label: 'النسخ الاحتياطي', node: <BackupView showToast={setToastMsg} /> }, { k: 'custommsgs', label: 'رسايل مخصصة', node: <CustomMsgsView showToast={setToastMsg} data={data} /> }, { k: 'telegram', label: 'تيليجرام', node: <TelegramView showToast={setToastMsg} branches={data.branches} staff={data.staff} /> }] : [])]} />}
                             {activeTab === 'dues' && !isDoctor && <DuesView focusIds={focus?.tab === 'dues' ? focus.ids : null} items={filteredData.dues} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'due', mode:'add'})} onEdit={(d)=>setModal({type:'due', mode:'edit', data:d})} showToast={setToastMsg} />}
                                                         {activeTab === 'consumables' && isAdminOrSuper && <ConsumablesView allItems={data.consumables} items={filteredData.consumables} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'consumable', mode:'add', data:{kind:'purchase'}})} onEdit={(d)=>setModal({type:'consumable', mode:'edit', data:d})} showToast={setToastMsg} />}
                             {activeTab === 'shortages' && !isDoctor && <ShortagesView focusIds={focus?.tab === 'shortages' ? focus.ids : null} onBuy={(it)=> !isAdminOrSuper ? setConfirmAction({msg:'هل تم توفير وشراء هذا الصنف؟', onConfirm:()=>db.collection('shortages').doc(it.id).delete().then(()=>setToastMsg('تم')).catch(err=>setToastMsg('مشكلة: '+err.message))}) : quickBuy(it)} shortages={filteredData.shortages} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onEdit={(d)=>setModal({type:'shortage', mode:'edit', data:d})} showToast={setToastMsg} />}
@@ -1942,6 +2041,101 @@
             );
         }
 
+        // ===== شاشة الرسايل المخصصة =====
+        const CM_EXAMPLES = [
+            { name: 'تذكير الدكاترة بحجوزات بكرة', when: 'daily', time: '20:00', to: { doctors: true }, skipZero: 'حجوزات_بكرة', text: 'مساء الخير يا د. {الدكتور} 🌙\nعندك بكرة {حجوزات_بكرة} حجز.' },
+            { name: 'تأكيد حجوزات بكرة (السكرتارية)', when: 'daily', time: '17:00', to: { branches: true }, skipZero: 'غير_مؤكد_بكرة', text: '📞 فرع {الفرع}: فيه {غير_مؤكد_بكرة} حجز بكرة لسه مش مؤكد — كلّموهم.' },
+            { name: 'ملخص آخر الأسبوع', when: 'weekly', days: [4], time: '22:00', to: { main: true }, text: '📊 ملخص {التاريخ}\nحجوزات النهاردة: {حجوزات_النهاردة}\nكنسل: {كنسل_النهاردة}\nمتابعات مستحقة: {متابعات_مستحقة}' }
+        ];
+        function CustomMsgsView({ showToast, data }) {
+            const [list, setList] = useState(null);
+            const [open, setOpen] = useState(null);
+            const [dirty, setDirty] = useState(false);
+            const refs = useRef({});
+            useEffect(() => { db.collection('private_config').doc('custom_msgs').get().then(d => setList((d.exists && d.data().list) || [])).catch(e => showToast(e.message)); }, []);
+            if (!list) return <p className="text-xs font-bold text-gray-400">...</p>;
+            const ctx = () => { const today = localDay(); return { branches: data.branches, staff: data.staff, apps: data.appointments, patients: data.patients, labs: data.labCases, shortages: data.shortages, today, tomorrow: dayShift(today, 1), tg: TG }; };
+            const upd = (id, patch) => { setList(l => l.map(m => m.id === id ? { ...m, ...patch } : m)); setDirty(true); };
+            const add = (ex) => { const id = 'c' + Date.now(); setList(l => [...l, { id, on: true, when: 'daily', time: '09:00', days: [], date: localDay(), to: {}, branchIds: [], text: '', skipZero: '', name: 'رسالة جديدة', ...(ex ? JSON.parse(JSON.stringify(ex)) : {}) }]); setOpen(id); setDirty(true); };
+            const save = () => db.collection('private_config').doc('custom_msgs').set({ list, updatedAt: new Date().toISOString() }).then(() => { setDirty(false); showToast('تم حفظ الرسايل ✓'); }).catch(e => showToast(e.message));
+            const insertVar = (m, v) => {
+                const el = refs.current[m.id], tok = '{' + v + '}';
+                if (!el) { upd(m.id, { text: (m.text || '') + tok }); return; }
+                const a = el.selectionStart ?? (m.text || '').length, b = el.selectionEnd ?? a, t = m.text || '';
+                upd(m.id, { text: t.slice(0, a) + tok + t.slice(b) });
+                setTimeout(() => { el.focus(); el.selectionStart = el.selectionEnd = a + tok.length; }, 0);
+            };
+            const inp = "w-full p-2.5 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500";
+            const chk = (on, label, onChange) => <label className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11px] font-bold cursor-pointer ${on ? 'bg-gold-50 border-gold-300 text-gold-800' : 'bg-white border-gray-200 text-gray-600'}`}><input type="checkbox" checked={on} onChange={onChange} className="hidden" />{on ? '☑' : '☐'} {label}</label>;
+            return (
+                <div className="space-y-3 max-w-2xl">
+                    <div className="bg-white rounded-[20px] border border-gray-100 shadow-sm p-5 space-y-2">
+                        <h4 className="font-black text-gray-800 text-sm">✍️ رسايل مخصصة</h4>
+                        <p className="text-[11px] text-gray-500 font-bold leading-relaxed">اكتبي الرسالة بكلامك العادي، ودوسي على الزراير عشان تحطي أرقام بتتحسب لوحدها (زي عدد حجوزات بكرة). تحت كل رسالة "الترجمة": إمتى هتتبعت ولمين، وشكلها بالظبط لكل واحد. بتتبعت من السيستم أو سكريبت جوجل (أيهم شغال).</p>
+                        <div className="flex flex-wrap gap-2 pt-1">
+                            <button type="button" onClick={() => add()} className="bg-gold-500 text-white px-3 py-2 rounded-xl text-xs font-black">+ رسالة جديدة</button>
+                            {CM_EXAMPLES.map((ex, i) => <button key={i} type="button" onClick={() => add(ex)} className="bg-gray-100 text-gray-700 px-3 py-2 rounded-xl text-[11px] font-bold">مثال: {ex.name}</button>)}
+                        </div>
+                    </div>
+                    {list.length === 0 && <p className="text-xs text-gray-400 font-bold text-center py-6">مفيش رسايل مخصصة لسه.</p>}
+                    {list.map(m => {
+                        const isOpen = open === m.id;
+                        let built = []; try { built = cmBuild(m, ctx()); } catch (e) {}
+                        const allR = (() => { try { return cmRecipients(m, ctx()).length; } catch (e) { return 0; } })();
+                        return (
+                            <div key={m.id} className={`bg-white rounded-[20px] border shadow-sm ${m.on ? 'border-gray-100' : 'border-gray-100 opacity-60'}`}>
+                                <div className="flex items-center gap-3 p-4 cursor-pointer" onClick={() => setOpen(isOpen ? null : m.id)}>
+                                    <span onClick={e => { e.stopPropagation(); upd(m.id, { on: !m.on }); }} className={`relative w-10 h-5 rounded-full shrink-0 ${m.on ? 'bg-emerald-500' : 'bg-gray-300'}`}><span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-all ${m.on ? 'right-0.5' : 'right-[22px]'}`}></span></span>
+                                    <div className="min-w-0 flex-1"><p className="text-sm font-black text-gray-800 truncate">{m.name || 'بدون اسم'}</p><p className="text-[10px] font-bold text-gray-400 truncate">{cmExplain(m, data.branches)}</p></div>
+                                    <span className="text-gray-400 text-xs">{isOpen ? '▲' : '▼'}</span>
+                                </div>
+                                {isOpen && <div className="px-4 pb-4 space-y-3 border-t border-gray-100 pt-3">
+                                    <input value={m.name || ''} onChange={e => upd(m.id, { name: e.target.value })} className={inp} placeholder="اسم الرسالة (ليكي انتي بس)" />
+                                    <div className="space-y-1.5"><p className="text-[10px] font-black text-gray-500">إمتى؟</p>
+                                        <div className="flex flex-wrap gap-2 items-center">
+                                            {[['daily', 'كل يوم'], ['weekly', 'أيام معينة'], ['once', 'مرة واحدة']].map(([k, n]) => <button key={k} type="button" onClick={() => upd(m.id, { when: k })} className={`px-3 py-1.5 rounded-lg text-[11px] font-black ${m.when === k ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-600'}`}>{n}</button>)}
+                                            <span className="text-[11px] font-bold text-gray-500">الساعة</span><input type="time" value={m.time || ''} onChange={e => upd(m.id, { time: e.target.value })} className="p-1.5 bg-gray-50 border border-gray-100 rounded-lg text-xs font-bold" />
+                                            {m.when === 'once' && <input type="date" value={m.date || ''} onChange={e => upd(m.id, { date: e.target.value })} className="p-1.5 bg-gray-50 border border-gray-100 rounded-lg text-xs font-bold" />}
+                                        </div>
+                                        {m.when === 'weekly' && <div className="flex flex-wrap gap-1.5">{CM_DAYS.map(([d, n]) => chk((m.days || []).includes(d), n, () => upd(m.id, { days: (m.days || []).includes(d) ? m.days.filter(x => x !== d) : [...(m.days || []), d] })))}</div>}
+                                    </div>
+                                    <div className="space-y-1.5"><p className="text-[10px] font-black text-gray-500">لمين؟</p>
+                                        <div className="flex flex-wrap gap-1.5">{CM_TO.map(([k, n]) => <React.Fragment key={k}>{chk(!!(m.to || {})[k], n, () => upd(m.id, { to: { ...(m.to || {}), [k]: !(m.to || {})[k] } }))}</React.Fragment>)}</div>
+                                        <div className="flex flex-wrap gap-1.5 items-center"><span className="text-[10px] font-bold text-gray-400">الفروع:</span>
+                                            {chk(!(m.branchIds || []).length, 'كل الفروع', () => upd(m.id, { branchIds: [] }))}
+                                            {data.branches.map(b => <React.Fragment key={b.id}>{chk((m.branchIds || []).includes(b.id), b.name, () => upd(m.id, { branchIds: (m.branchIds || []).includes(b.id) ? m.branchIds.filter(x => x !== b.id) : [...(m.branchIds || []), b.id] }))}</React.Fragment>)}</div>
+                                    </div>
+                                    <div className="space-y-1.5"><p className="text-[10px] font-black text-gray-500">الرسالة</p>
+                                        <textarea ref={el => { refs.current[m.id] = el; }} rows="4" value={m.text || ''} onChange={e => upd(m.id, { text: e.target.value })} className={inp + ' text-sm leading-relaxed'} placeholder="اكتبي الرسالة هنا..." />
+                                        <div className="flex flex-wrap gap-1">{CM_VARS.map(([k, n]) => <button key={k} type="button" onClick={() => insertVar(m, k)} className="px-2 py-1 rounded-md bg-blue-50 text-blue-700 text-[10px] font-black hover:bg-blue-100">+ {n}</button>)}</div>
+                                        <label className="flex items-center gap-2 text-[11px] font-bold text-gray-600 flex-wrap">متتبعتش لو
+                                            <select value={m.skipZero || ''} onChange={e => upd(m.id, { skipZero: e.target.value })} className="p-1.5 bg-gray-50 border border-gray-100 rounded-lg text-[11px] font-bold"><option value="">— ابعت دايماً —</option>{CM_VARS.slice(3).map(([k, n]) => <option key={k} value={k}>{n}</option>)}</select>
+                                            {m.skipZero && '= صفر'}</label>
+                                    </div>
+                                    <div className="bg-indigo-50 border border-indigo-100 rounded-xl p-3 space-y-2">
+                                        <p className="text-[11px] font-black text-indigo-800">🔎 الترجمة</p>
+                                        <p className="text-xs font-bold text-indigo-900 leading-relaxed">{cmExplain(m, data.branches)}</p>
+                                        {(!TG.token) && <p className="text-[11px] font-bold text-red-600">⚠️ مفيش توكن تيليجرام محفوظ.</p>}
+                                        {allR === 0 ? <p className="text-[11px] font-bold text-red-600">⚠️ مفيش حد هيستلمها: اتأكدي إن اللي اخترتيهم ليهم رقم شات في تبويب "تيليجرام".</p>
+                                            : <p className="text-[11px] font-bold text-indigo-700">لو اتبعتت دلوقتي: هتوصل لـ {built.length} من {allR}{built.length < allR ? ' (الباقي متخطّى عشان الرقم = صفر)' : ''}</p>}
+                                        {/\{[^{}]+\}/.test(built[0] ? built[0].text : '') && <p className="text-[11px] font-bold text-amber-700">⚠️ فيه كلمة بين أقواس السيستم مش فاهمها — استخدمي الزراير الزرقا.</p>}
+                                        {built.slice(0, 3).map((x, i) => <div key={i} className="bg-white rounded-lg p-2.5 border border-indigo-100"><p className="text-[9px] font-black text-gray-400 mb-1">← {x.r.label}</p><p className="text-xs font-bold text-gray-800 whitespace-pre-line">{x.text}</p></div>)}
+                                        {built.length > 3 && <p className="text-[10px] font-bold text-indigo-600">+ {built.length - 3} كمان</p>}
+                                    </div>
+                                    <div className="flex flex-wrap gap-2">
+                                        <button type="button" onClick={() => { if (!TG.token || !TG.main) { showToast('محتاجة توكن وشات إدارة'); return; } const x = built[0]; tgPost(TG.main, '🧪 تجربة: ' + (m.name || '') + '\n\n' + (x ? x.text : cmRender(m.text, {}))).then(() => showToast('اتبعتت تجربة على شات الإدارة')).catch(e => showToast(e.message)); }} className="bg-gray-100 px-3 py-2 rounded-xl text-[11px] font-black">🧪 ابعت تجربة لشات الإدارة</button>
+                                        <button type="button" onClick={() => { if (!built.length) { showToast('مفيش حد هيستلم'); return; } if (!confirm('تبعتي الرسالة دلوقتي لـ ' + built.length + '؟')) return; cmSendAll(built); showToast('بتتبعت لـ ' + built.length); }} className="bg-gray-900 text-white px-3 py-2 rounded-xl text-[11px] font-black">📤 ابعت دلوقتي للكل</button>
+                                        <button type="button" onClick={() => { if (!confirm('حذف الرسالة؟')) return; setList(l => l.filter(x => x.id !== m.id)); setDirty(true); }} className="text-red-500 px-2 text-[11px] font-black mr-auto">حذف</button>
+                                    </div>
+                                </div>}
+                            </div>
+                        );
+                    })}
+                    <button type="button" onClick={save} disabled={!dirty} className="w-full bg-gold-500 text-white py-3 rounded-xl font-black text-sm disabled:opacity-40">{dirty ? 'حفظ الرسايل' : 'محفوظ ✓'}</button>
+                </div>
+            );
+        }
+
         // إعدادات تيليجرام (السوبر أدمن بس) — بتتحفظ في مكان مقفول على الموظفين
         function TelegramView({ showToast, branches = [], staff = [] }) {
             const doctors = staff.filter(x => x.role === 'doctor');
@@ -1965,7 +2159,7 @@
             }, [v && v.token]);
             useEffect(() => { db.collection('private_config').doc('telegram').get().then(d => {
                 const x = d.exists ? d.data() : {}, bx = x.branches || {};
-                setV({ token: x.token || '', main: x.main || '', branches: Object.fromEntries(branches.map(b => [b.id, bx[b.id] || bx[b.name] || ''])), people: mergePeople(x), routes: mergeRoutes(x) });
+                setV({ token: x.token || '', main: x.main || '', branches: Object.fromEntries(branches.map(b => [b.id, bx[b.id] || bx[b.name] || ''])), people: mergePeople(x), routes: mergeRoutes(x), off: x.off || [], quiet: x.quiet || {} });
             }).catch(e => showToast(e.message)); }, []);
             if (!v) return <p className="text-xs font-bold text-gray-400">...</p>;
             const inp = "w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold outline-none text-xs focus:border-gold-500";
@@ -1975,7 +2169,7 @@
                 const ids = new Set(staff.map(x => x.id)), pp = {};
                 // بنحفظ اللي ليه رقم شات بس، ومن اللي اتشالوا من السيستم بنشيلهم
                 Object.entries(v.people || {}).forEach(([k, per]) => { const chat = String(per.chat || '').trim(); if (!chat || (!per.manual && !ids.has(k))) return; pp[k] = { chat, kinds: per.kinds || [], ...(per.manual ? { manual: true, name: (per.name || '').trim() } : {}) }; });
-                db.collection('private_config').doc('telegram').set({ token: v.token.trim(), main: v.main.trim(), branches: br, people: pp, routes: v.routes, routesKnown: TG_KINDS.map(k => k[0]) })
+                db.collection('private_config').doc('telegram').set({ token: v.token.trim(), main: v.main.trim(), branches: br, people: pp, routes: v.routes, off: v.off || [], quiet: v.quiet || {}, routesKnown: TG_KINDS.map(k => k[0]) })
                     .then(() => showToast('تم حفظ إعدادات تيليجرام')).catch(e => showToast(e.message));
             };
             const test = (chat, label, key) => {
@@ -2070,6 +2264,20 @@
                         {doctors.length === 0 && <p className="text-[11px] font-bold text-gray-400">مفيش دكاترة متسجلين لسه.</p>}
                         {doctors.map(x => <React.Fragment key={x.id}>{PersonRow({ id: (x.id), name: ('د. ' + x.name), tag: (doctorBranchIds(x, branches).map(id => (branches.find(b => b.id === id) || {}).name).filter(Boolean).join('، ')), type: "doctor" })}</React.Fragment>)}
                         <p className="text-[10px] text-gray-500 font-bold bg-blue-50 rounded-xl p-2.5 leading-relaxed">إزاي ياخد رقمه: يفتح بوت العيادة ويدوس <b>Start</b> (لازم)، وبعدين يفتح <a href="https://t.me/myidbot" target="_blank" rel="noreferrer" className="text-blue-600 underline" dir="ltr">@myidbot</a> ويبعتله <b dir="ltr">/getid</b> ويبعتلك الرقم.</p>
+                    </div>
+                    <div className={card}>
+                        <h4 className="font-black text-gray-800 text-sm">🔔 تشغيل / إيقاف الرسايل</h4>
+                        <p className="text-[10px] text-gray-400 font-bold">اللي تقفليه هنا بيقف للكل (الإدارة والفروع والأدمنز والدكاترة) لحد ما ترجعي تفتحيه. الصلاحيات اللي تحت بتفضل محفوظة زي ما هي.</p>
+                        <div className="divide-y divide-gray-50">{TG_KINDS.map(([k, n]) => { const on = !(v.off || []).includes(k); return (
+                            <label key={k} className="flex items-center justify-between gap-3 py-2 cursor-pointer">
+                                <span className={`text-xs font-bold ${on ? 'text-gray-800' : 'text-gray-400 line-through'}`}>{n}</span>
+                                <span onClick={e => { e.preventDefault(); setV(p => ({ ...p, off: on ? [...(p.off || []), k] : (p.off || []).filter(x => x !== k) })); }} className={`relative w-10 h-5 rounded-full transition-colors shrink-0 ${on ? 'bg-emerald-500' : 'bg-gray-300'}`}><span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-all ${on ? 'right-0.5' : 'right-[22px]'}`}></span></span>
+                            </label>); })}</div>
+                        <div className="border-t border-gray-100 pt-3 space-y-2">
+                            <p className="text-[11px] font-black text-gray-700">لما مفيش حجوزات</p>
+                            {[['doctor', 'متبعتش للدكتور "مفيش حجوزات ليك النهاردة"'], ['branch', 'متبعتش جدول الفرع لو مفيهوش حجوزات']].map(([k, n]) => <label key={k} className="flex items-center gap-2 text-xs font-bold text-gray-700 cursor-pointer">
+                                <input type="checkbox" checked={!!(v.quiet || {})[k]} onChange={e => setV(p => ({ ...p, quiet: { ...(p.quiet || {}), [k]: e.target.checked } }))} />{n}</label>)}
+                        </div>
                     </div>
                     <div className={card}>
                         <h4 className="font-black text-gray-800 text-sm">مين يوصله إيه</h4>
