@@ -213,7 +213,8 @@
         };
         // off = أنواع رسايل موقّفة للكل، quiet = { branch: متبعتش جدول فرع فاضي، doctor: متبعتش جدول دكتور فاضي }
         const TG = { token: '', main: '', branches: {}, people: {}, routes: TG_DEFAULT_ROUTES, off: [], quiet: {} };
-        const tgOn = kind => !(TG.off || []).includes(kind);
+        const tgOn = kind => !(TG.off || []).includes(kind) && !Object.entries(TPL_KIND).some(([k, v]) => v === kind && !tplOn(k));
+        const tgQuiet = k => !!(((TPL._quiet || {})[k]) ?? (TG.quiet || {})[k]);
         const tgPost = (chat, text) => fetch(`https://api.telegram.org/bot${TG.token}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chat, text }) });
         // مين من الأشخاص يستلم الإشعار ده
         const personGets = (key, per, kind, branchId, doctorIds) => {
@@ -279,14 +280,14 @@
         // جدول فرع للشات الرئيسي وشات الفرع
         const hasSched = (pred, apps, date) => apps.some(a => pred(a) && a.date === date && a.status !== 'canceled');
         const sendSchedules = (branches, apps, date) => {
-            if (!TG.token || !tgOn('schedule')) return;
+            if (!TG.token || !tgOn('schedule') || !tplOn('grpSched')) return;
             const r = TG.routes || TG_DEFAULT_ROUTES, pairs = [];
             branches.forEach(b => {
                 const chats = [];
                 if (TG.main && (r.main || []).includes('schedule')) chats.push(TG.main);
                 const bc = TG.branches[b.id] || TG.branches[b.name];
                 if (bc && (r.branch || []).includes('schedule')) chats.push(bc);
-                if (TG.quiet.branch && !hasSched(a => a.branchId === b.id, apps, date)) return;
+                if (tgQuiet('branch') && !hasSched(a => a.branchId === b.id, apps, date)) return;
                 const msgs = scheduleMessages(b, apps, date);
                 [...new Set(chats.map(String))].forEach(c => msgs.forEach(m => pairs.push([c, m])));
             });
@@ -296,10 +297,12 @@
         const sendPersonSchedule = (t, branches, apps, date) => {
             if (!TG.token || !tgOn('schedule')) return;
             if (t.type === 'doctor') {
-                if (TG.quiet.doctor && !hasSched(a => a.doctorId === t.key, apps, date)) return;
+                if (!tplOn('grpDocSched')) return;
+                if (tgQuiet('doctor') && !hasSched(a => a.doctorId === t.key, apps, date)) return;
                 return queueSend([[t.per.chat, doctorScheduleMessage(t.key, t.st.name || '', branches, apps, date)]]);
             }
-            const pairs = []; branches.filter(b => !TG.quiet.branch || hasSched(a => a.branchId === b.id, apps, date)).forEach(b => scheduleMessages(b, apps, date).forEach(m => pairs.push([t.per.chat, m])));
+            if (!tplOn('grpSched')) return;
+            const pairs = []; branches.filter(b => !tgQuiet('branch') || hasSched(a => a.branchId === b.id, apps, date)).forEach(b => scheduleMessages(b, apps, date).forEach(m => pairs.push([t.per.chat, m])));
             return queueSend(pairs);
         };
         // ===== رسايل مخصصة (بيعملها الأدمن من غير أكواد) =====
@@ -407,6 +410,9 @@
             tgDue: '🧾 فاتورة/مستحق جديد\nالجهة: {party}\nالمبلغ: {amount} ج\nموعد السداد: {due}\nالفرع: {branch}\nبواسطة: {by}'
         };
         const TPL = { ...TPL_DEFAULT };
+        // القوالب المحذوفة: الرسالة دي مش بتتبعت/زرارها مش بيظهر. _quiet = متبعتش الجدول لو فاضي
+        const tplOn = k => !((TPL._deleted || []).includes(k));
+        const TPL_KIND = { tgApp: 'booking', tgOnline: 'online', tgCancel: 'cancel', tgResched: 'reschedule', tgFollow: 'follow', tgLab: 'lab', tgShortage: 'shortage', tgDue: 'due', tgDigest: 'digest' };
         const fillT = (k, v) => String(TPL[k] || '').replace(/\{(\w+)\}/g, (m, x) => v[x] ?? '');
         // بيانات حية لحساب الإجماليات في رسائل تيليجرام (بتتحدث من App)
         const LIVE = { appointments: [], dues: [], shortages: [], branches: [], staff: [] };
@@ -592,7 +598,7 @@
             );
         }
         const addDays = n => new Date(Date.now() + n * 864e5).toISOString().split('T')[0];
-        const waLink = (c, phone) => { const text = fillT('lab', { patient: c.patientName, case: c.caseType, date: c.sentDate }); return (phone || c.labPhone) ? waUrl(phone || c.labPhone, text) : waOpen('', text); };
+        const waLink = (c, phone) => { const text = !tplOn('lab') ? '' : fillT('lab', { patient: c.patientName, case: c.caseType, date: c.sentDate }); return (phone || c.labPhone) ? waUrl(phone || c.labPhone, text) : waOpen('', text); };
         function WaMsg({ phone, text, label }) { const l = waUrl(phone, text); return l ? <a href={l} target={WA_TARGET} rel="noreferrer" className="px-2 py-1.5 bg-green-500 text-white rounded-lg text-[9px] font-bold whitespace-nowrap">{label}</a> : null; }
         const bLabel = (branches, id) => id === 'store' ? 'المخزن الرئيسي' : (branches.find(b => b.id === id)?.name || 'غير معروف');
         function BranchGroups({ items, branches, render, empty, sub }) {
@@ -1104,7 +1110,7 @@
                 ...data.labCases.filter(c => labDue(c) && inScope(c)).map(c => ({ id: 'l' + c.id, kind: 'lab', refId: c.id, tab: 'labs', text: '⏰ اطلبي من ' + c.labName + ': ' + c.patientName, ts: new Date(c.sentDate).getTime() + labRemindDays(c) * 864e5, wa: waLink(c, labPhoneAll[c.labName]), itemName: c.patientName, branchId: c.branchId }))
             ];
             const labPhoneAll = Object.fromEntries(data.labCases.filter(x => x.labPhone).sort((a, b) => (a.sentDate || '').localeCompare(b.sentDate || '')).map(x => [x.labName, x.labPhone]));
-            const reviewRows = currentUser.role !== 'employee' ? [] : data.appointments
+            const reviewRows = (currentUser.role !== 'employee' || !tplOn('review')) ? [] : data.appointments
                 .filter(a => a.branchId === currentUser.branchId && (a.status === 'arrived' || a.status === 'done') && !a.reviewSent && !a.reviewSkipped && a.date <= todayS && a.date >= addDays(-3))
                 .sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')))
                 .map(a => { const br = data.branches.find(b => b.id === a.branchId) || {}; return { id: a.id, name: a.patientName, url: waUrl(a.phone, fillT('review', { name: a.patientName, branch: br.name || '', link: br.reviewLink || br.mapsLink || '' })) }; });
@@ -1215,7 +1221,7 @@
                             {activeTab === 'daily' && currentUser.role === 'employee' && <DailyView payments={data.payments} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'payment', mode:'add', data:{branchId:currentUser.branchId}})} onEdit={(d)=>setModal({type:'payment', mode:'edit', data:d})} showToast={setToastMsg} />}
                             {activeTab === 'finance' && isSuperAdmin && <FinanceView payments={filteredData.payments} branches={data.branches} selectedBranch={selectedBranch} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={(bId)=>setModal({type:'payment', mode:'add', data:{branchId:bId}})} onEdit={(d)=>setModal({type:'payment', mode:'edit', data:d})} showToast={setToastMsg} />}
                                                         {activeTab === 'labs' && <LabsView focusId={focus?.tab === 'labs' ? focus.id : null} cases={filteredData.labCases} costs={costs} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'lab', mode:'add'})} onEdit={(d)=>setModal({type:'lab', mode:'edit', data:d})} showToast={setToastMsg} />}
-                            {activeTab === 'settings' && isAdminOrSuper && <SettingsView sections={[{ k: 'branches', label: 'الفروع', node: <BranchesView branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'branch', mode:'add'})} onEdit={(d)=>setModal({type:'branch', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'templates', label: 'قوالب الرسائل', node: <TemplatesView showToast={setToastMsg} /> }, ...(isSuperAdmin ? [{ k: 'staff', label: 'الموظفين', node: <StaffView staff={staffFull} branches={data.branches} onConfirm={setConfirmAction} onAdd={(k)=>setModal({type:'staff', mode:'add', data:{kind:k}})} onEdit={(d)=>setModal({type:'staff', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'mycode', label: 'حسابي', node: <MasterCodeView currentUser={currentUser} showToast={setToastMsg} /> }, { k: 'backup', label: 'النسخ الاحتياطي', node: <BackupView showToast={setToastMsg} /> }, { k: 'custommsgs', label: 'رسايل مخصصة', node: <CustomMsgsView showToast={setToastMsg} data={data} /> }, { k: 'telegram', label: 'تيليجرام', node: <TelegramView showToast={setToastMsg} branches={data.branches} staff={data.staff} /> }] : [])]} />}
+                            {activeTab === 'settings' && isAdminOrSuper && <SettingsView sections={[{ k: 'branches', label: 'الفروع', node: <BranchesView branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'branch', mode:'add'})} onEdit={(d)=>setModal({type:'branch', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'templates', label: 'قوالب الرسائل', node: <TemplatesView showToast={setToastMsg} data={data} isSuper={isSuperAdmin} /> }, ...(isSuperAdmin ? [{ k: 'staff', label: 'الموظفين', node: <StaffView staff={staffFull} branches={data.branches} onConfirm={setConfirmAction} onAdd={(k)=>setModal({type:'staff', mode:'add', data:{kind:k}})} onEdit={(d)=>setModal({type:'staff', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'mycode', label: 'حسابي', node: <MasterCodeView currentUser={currentUser} showToast={setToastMsg} /> }, { k: 'backup', label: 'النسخ الاحتياطي', node: <BackupView showToast={setToastMsg} /> }, { k: 'telegram', label: 'تيليجرام', node: <TelegramView showToast={setToastMsg} branches={data.branches} staff={data.staff} /> }] : [])]} />}
                             {activeTab === 'dues' && !isDoctor && <DuesView focusIds={focus?.tab === 'dues' ? focus.ids : null} items={filteredData.dues} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'due', mode:'add'})} onEdit={(d)=>setModal({type:'due', mode:'edit', data:d})} showToast={setToastMsg} />}
                                                         {activeTab === 'consumables' && isAdminOrSuper && <ConsumablesView allItems={data.consumables} items={filteredData.consumables} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'consumable', mode:'add', data:{kind:'purchase'}})} onEdit={(d)=>setModal({type:'consumable', mode:'edit', data:d})} showToast={setToastMsg} />}
                             {activeTab === 'shortages' && !isDoctor && <ShortagesView focusIds={focus?.tab === 'shortages' ? focus.ids : null} onBuy={(it)=> !isAdminOrSuper ? setConfirmAction({msg:'هل تم توفير وشراء هذا الصنف؟', onConfirm:()=>db.collection('shortages').doc(it.id).delete().then(()=>setToastMsg('تم')).catch(err=>setToastMsg('مشكلة: '+err.message))}) : quickBuy(it)} shortages={filteredData.shortages} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onEdit={(d)=>setModal({type:'shortage', mode:'edit', data:d})} showToast={setToastMsg} />}
@@ -1776,7 +1782,7 @@
                                                                 </div>
                                                             </div>
                                                         </div>
-                                                        <div className="flex gap-1 shrink-0 self-end sm:self-auto items-center"><StatusSelect a={a} showToast={showToast} />{(() => { const br = branches.find(b => b.id === a.branchId) || {}; return (<><WaMsg phone={a.phone} label="تذكير" text={fillT('reminder', { name: a.patientName, branch: br.name || '', date: a.date, time: a.time || '' })} />{(a.status === 'done' || a.status === 'arrived') && <WaMsg phone={a.phone} label={a.reviewSent ? 'تقييم ✓' : 'تقييم'} text={fillT('review', { name: a.patientName, branch: br.name || '', link: br.reviewLink || br.mapsLink || '' })} />}</>); })()}{currentUser.role !== 'doctor' && (<>
+                                                        <div className="flex gap-1 shrink-0 self-end sm:self-auto items-center"><StatusSelect a={a} showToast={showToast} />{(() => { const br = branches.find(b => b.id === a.branchId) || {}; return (<>{tplOn('reminder') && <WaMsg phone={a.phone} label="تذكير" text={fillT('reminder', { name: a.patientName, branch: br.name || '', date: a.date, time: a.time || '' })} />}{tplOn('review') && (a.status === 'done' || a.status === 'arrived') && <WaMsg phone={a.phone} label={a.reviewSent ? 'تقييم ✓' : 'تقييم'} text={fillT('review', { name: a.patientName, branch: br.name || '', link: br.reviewLink || br.mapsLink || '' })} />}</>); })()}{currentUser.role !== 'doctor' && (<>
                                                             <button type="button" onClick={()=>onEdit(a)} className="p-1.5 bg-white border border-gray-200 text-gold-500 rounded-lg hover:bg-gold-500 hover:text-white transition-colors"><IconEdit/></button>
                                                             <button type="button" onClick={()=>onConfirm({msg:'إلغاء الموعد نهائياً؟', onConfirm:()=>{
                                                                 db.collection('appointments').doc(a.id).delete()
@@ -1900,7 +1906,7 @@
                                 <div className="mt-3 space-y-2">
                                     <p className={`text-[10px] font-black px-2 py-1 rounded-lg inline-block ${p.followedAt ? 'bg-emerald-100 text-emerald-700' : due ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'}`}>{p.followedAt ? '✓ تمت المتابعة' : (due ? '📞 حان موعد المتابعة' : 'متابعة: ' + p.followUpDate)}</p>
                                     {!p.followedAt && <div className="flex gap-1.5 flex-wrap">
-                                        <WaMsg phone={p.phone} label="واتساب متابعة" text={fillT('followup', { name: p.name, branch: bn, service: svcText(p) })} />
+                                        {tplOn('followup') && <WaMsg phone={p.phone} label="واتساب متابعة" text={fillT('followup', { name: p.name, branch: bn, service: svcText(p) })} />}
                                         <button type="button" onClick={() => upd(p, { followedAt: new Date().toISOString() }, 'تم تسجيل المتابعة')} className="px-2 py-1.5 bg-emerald-500 text-white rounded-lg text-[9px] font-bold">تمت المتابعة</button>
                                         <button type="button" onClick={() => { const base = p.followUpDate && p.followUpDate > t ? p.followUpDate : t; const nd = new Date(base + 'T00:00:00'); nd.setDate(nd.getDate() + 7); const ndS = nd.getFullYear() + '-' + String(nd.getMonth() + 1).padStart(2, '0') + '-' + String(nd.getDate()).padStart(2, '0'); upd(p, { followUpDate: ndS, followUpDays: 7, followedAt: '', followRemind: false }, 'اتأجلت أسبوع: من ' + p.followUpDate + ' إلى ' + ndS); }} className="px-2 py-1.5 bg-gray-100 text-gray-600 rounded-lg text-[9px] font-bold">أجّل أسبوع</button>
                                     </div>}
@@ -2086,11 +2092,10 @@
                             <div key={m.id} className={`bg-white rounded-[20px] border shadow-sm ${m.on ? 'border-gray-100' : 'border-gray-100 opacity-60'}`}>
                                 <div className="flex items-center gap-3 p-4 cursor-pointer" onClick={() => setOpen(isOpen ? null : m.id)}>
                                     <span onClick={e => { e.stopPropagation(); upd(m.id, { on: !m.on }); }} className={`relative w-10 h-5 rounded-full shrink-0 ${m.on ? 'bg-emerald-500' : 'bg-gray-300'}`}><span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-all ${m.on ? 'right-0.5' : 'right-[22px]'}`}></span></span>
-                                    <div className="min-w-0 flex-1"><p className="text-sm font-black text-gray-800 truncate">{m.name || 'بدون اسم'}</p><p className="text-[10px] font-bold text-gray-400 truncate">{cmExplain(m, data.branches)}</p></div>
+                                    <div className="min-w-0 flex-1"><EditableTitle value={m.name || 'بدون اسم'} onChange={t => upd(m.id, { name: t })} onDelete={() => { setList(l => l.filter(x => x.id !== m.id)); setDirty(true); }} deleteMsg="حذف الرسالة دي؟ (اتأكدي تدوسي حفظ بعدها)" /><p className="text-[10px] font-bold text-gray-400 truncate mt-0.5">{cmExplain(m, data.branches)}</p></div>
                                     <span className="text-gray-400 text-xs">{isOpen ? '▲' : '▼'}</span>
                                 </div>
                                 {isOpen && <div className="px-4 pb-4 space-y-3 border-t border-gray-100 pt-3">
-                                    <input value={m.name || ''} onChange={e => upd(m.id, { name: e.target.value })} className={inp} placeholder="اسم الرسالة (ليكي انتي بس)" />
                                     <div className="space-y-1.5"><p className="text-[10px] font-black text-gray-500">إمتى؟</p>
                                         <div className="flex flex-wrap gap-2 items-center">
                                             {[['daily', 'كل يوم'], ['weekly', 'أيام معينة'], ['once', 'مرة واحدة']].map(([k, n]) => <button key={k} type="button" onClick={() => upd(m.id, { when: k })} className={`px-3 py-1.5 rounded-lg text-[11px] font-black ${m.when === k ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-600'}`}>{n}</button>)}
@@ -2125,7 +2130,6 @@
                                     <div className="flex flex-wrap gap-2">
                                         <button type="button" onClick={() => { if (!TG.token || !TG.main) { showToast('محتاجة توكن وشات إدارة'); return; } const x = built[0]; tgPost(TG.main, '🧪 تجربة: ' + (m.name || '') + '\n\n' + (x ? x.text : cmRender(m.text, {}))).then(() => showToast('اتبعتت تجربة على شات الإدارة')).catch(e => showToast(e.message)); }} className="bg-gray-100 px-3 py-2 rounded-xl text-[11px] font-black">🧪 ابعت تجربة لشات الإدارة</button>
                                         <button type="button" onClick={() => { if (!built.length) { showToast('مفيش حد هيستلم'); return; } if (!confirm('تبعتي الرسالة دلوقتي لـ ' + built.length + '؟')) return; cmSendAll(built); showToast('بتتبعت لـ ' + built.length); }} className="bg-gray-900 text-white px-3 py-2 rounded-xl text-[11px] font-black">📤 ابعت دلوقتي للكل</button>
-                                        <button type="button" onClick={() => { if (!confirm('حذف الرسالة؟')) return; setList(l => l.filter(x => x.id !== m.id)); setDirty(true); }} className="text-red-500 px-2 text-[11px] font-black mr-auto">حذف</button>
                                     </div>
                                 </div>}
                             </div>
@@ -2273,11 +2277,6 @@
                                 <span className={`text-xs font-bold ${on ? 'text-gray-800' : 'text-gray-400 line-through'}`}>{n}</span>
                                 <span onClick={e => { e.preventDefault(); setV(p => ({ ...p, off: on ? [...(p.off || []), k] : (p.off || []).filter(x => x !== k) })); }} className={`relative w-10 h-5 rounded-full transition-colors shrink-0 ${on ? 'bg-emerald-500' : 'bg-gray-300'}`}><span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-all ${on ? 'right-0.5' : 'right-[22px]'}`}></span></span>
                             </label>); })}</div>
-                        <div className="border-t border-gray-100 pt-3 space-y-2">
-                            <p className="text-[11px] font-black text-gray-700">لما مفيش حجوزات</p>
-                            {[['doctor', 'متبعتش للدكتور "مفيش حجوزات ليك النهاردة"'], ['branch', 'متبعتش جدول الفرع لو مفيهوش حجوزات']].map(([k, n]) => <label key={k} className="flex items-center gap-2 text-xs font-bold text-gray-700 cursor-pointer">
-                                <input type="checkbox" checked={!!(v.quiet || {})[k]} onChange={e => setV(p => ({ ...p, quiet: { ...(p.quiet || {}), [k]: e.target.checked } }))} />{n}</label>)}
-                        </div>
                     </div>
                     <div className={card}>
                         <h4 className="font-black text-gray-800 text-sm">مين يوصله إيه</h4>
@@ -2331,39 +2330,88 @@
             );
         }
 
-        function TemplatesView({ showToast }) {
-            const [v, setV] = useState(() => ({ ...TPL }));
+        // أيقونات صغيرة للتعديل والحذف
+        const IcoEdit = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>;
+        const IcoTrash = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>;
+        // عنوان قابل للتعديل (أيقونة قلم) + أيقونة حذف
+        function EditableTitle({ value, onChange, onDelete, deleteMsg }) {
+            const [ed, setEd] = useState(false);
+            const [t, setT] = useState(value);
+            useEffect(() => setT(value), [value]);
+            const done = () => { setEd(false); if (t.trim() && t.trim() !== value) onChange(t.trim()); else setT(value); };
+            return (
+                <div className="flex items-center gap-1.5 min-w-0">
+                    {ed ? <input autoFocus value={t} onChange={e => setT(e.target.value)} onBlur={done} onKeyDown={e => { if (e.key === 'Enter') done(); if (e.key === 'Escape') { setT(value); setEd(false); } }} onClick={e => e.stopPropagation()} className="flex-1 min-w-0 p-1.5 bg-white border border-gold-300 rounded-lg text-xs font-black outline-none" />
+                        : <span className="text-xs font-black text-gray-800 truncate">{value}</span>}
+                    {!ed && <button type="button" title="تعديل الاسم" onClick={e => { e.stopPropagation(); setEd(true); }} className="shrink-0 w-7 h-7 rounded-lg bg-gray-100 text-gray-500 hover:text-gold-600 hover:bg-gold-50 flex items-center justify-center"><IcoEdit /></button>}
+                    {!ed && onDelete && <button type="button" title="حذف" onClick={e => { e.stopPropagation(); if (confirm(deleteMsg || 'حذف؟')) onDelete(); }} className="shrink-0 w-7 h-7 rounded-lg bg-gray-100 text-gray-500 hover:text-red-600 hover:bg-red-50 flex items-center justify-center"><IcoTrash /></button>}
+                </div>
+            );
+        }
+
+        function TemplatesView({ showToast, data, isSuper }) {
+            const [v, setV] = useState(() => ({ _titles: {}, _deleted: [], _quiet: { ...(TG.quiet || {}) }, ...JSON.parse(JSON.stringify(TPL)) }));
+            const [tab, setTab] = useState('wa');
+            const [dirty, setDirty] = useState(false);
             const WA = { reminder: ['تذكير الموعد', '{name} {branch} {date} {time}'], review: ['طلب التقييم', '{name} {branch} {link}'], followup: ['متابعة المريض', '{name} {branch} {service}'], lab: ['رسالة المعمل', '{patient} {case} {date}'] };
-            const TG_SCHED = {
-                tgSchedHead: ['جدول الصبح (الإدارة/الفرع) — أول الرسالة', '{branch} {date} {count} {canceled}'],
-                tgSchedDoctor: ['جدول الصبح — عنوان كل دكتور', '{doctor} {count}'],
-                tgSchedLine: ['جدول الصبح — سطر كل حجز', '{time} {patient} {service} {phone} {status} {online}'],
-                tgSchedEmpty: ['جدول الصبح — لو مفيش حجوزات', '{branch} {date} {canceled}'],
-                tgDocSchedHead: ['جدول الدكتور — أول الرسالة', '{doctor} {date} {count}'],
-                tgDocSchedLine: ['جدول الدكتور — سطر كل حجز', '{time} {patient} {service} {phone} {status} {online}'],
-                tgDocSchedEmpty: ['جدول الدكتور — لو مفيش حجوزات', '{doctor} {date}']
-            };
             const TG_L = { tgResched: ['تعديل ميعاد حجز', '{patient} {phone} {oldDate} {oldTime} {oldDoctor} {date} {time} {doctor} {branch} {by}'], tgApp: ['حجز جديد', '{patient} {date} {time} {service} {doctor} {branch} {by} | {count} = حجوزات نفس اليوم في الفرع، {countAll} = كل الفروع'], tgShortage: ['نقص جديد', '{item} {qty} {branch} {by} | {count} = نواقص الفرع، {countAll} = كل الفروع'], tgDue: ['فاتورة / مستحق جديد', '{party} {amount} {due} {branch} {by} | {sum} = إجمالي المستحق للفرع، {count} = عدد الفواتير، {sumAll} و{countAll} = كل الفروع'], tgLab: ['تذكير المعمل', '{days} {lab} {patient} {case} {branch}'], tgFollow: ['موعد متابعة مريض', '{patient} {service} {branch}'] , tgOnline: ['حجز أونلاين جديد', '{patient} {phone} {date} {time} {service} {doctor} {code} {branch} | {count} = حجوزات نفس اليوم في الفرع'], tgCancel: ['كنسل أو تأجيل', '{kind} {patient} {phone} {date} {time} {service} {doctor} {branch}'], tgDigest: ['ملخص الصبح اليومي', '{branch} {date} {today} {online} {tomorrow} {follow} {lab} {short}'] };
-            const save = () => db.collection('settings').doc('templates').set(v).then(() => showToast('تم حفظ الرسائل')).catch(e => showToast(e.message));
-            const block = (obj) => Object.entries(obj).map(([k, [title, vars]]) => (
-                <div key={k} className="bg-white p-4 rounded-[20px] border border-gray-100 shadow-sm space-y-1">
-                    <label className="text-xs font-black text-gray-700">{title}</label>
+            // جدول الصبح: مجموعتين (كل مجموعة بتتحذف/تتسمّى مع بعض)
+            const GROUPS = {
+                grpSched: ['جدول مواعيد الصبح (الإدارة / الفروع / الأدمنز)', [['tgSchedHead', 'أول الرسالة', '{branch} {date} {count} {canceled}'], ['tgSchedDoctor', 'عنوان كل دكتور', '{doctor} {count}'], ['tgSchedLine', 'سطر كل حجز', '{time} {patient} {service} {phone} {status} {online}'], ['tgSchedEmpty', 'لو مفيش حجوزات', '{branch} {date} {canceled}', 'branch', 'متبعتش جدول الفرع لو مفيهوش حجوزات']]],
+                grpDocSched: ['جدول مواعيد الدكتور (كل دكتور جدوله)', [['tgDocSchedHead', 'أول الرسالة', '{doctor} {date} {count}'], ['tgDocSchedLine', 'سطر كل حجز', '{time} {patient} {service} {phone} {status} {online}'], ['tgDocSchedEmpty', 'لو مفيش حجوزات', '{doctor} {date}', 'doctor', 'متبعتش للدكتور "مفيش حجوزات ليك النهاردة"']]]
+            };
+            const set = patch => { setV(p => ({ ...p, ...patch })); setDirty(true); };
+            const title = (k, def) => (v._titles || {})[k] || def;
+            const setTitle = (k, t) => set({ _titles: { ...(v._titles || {}), [k]: t } });
+            const del = k => set({ _deleted: [...new Set([...(v._deleted || []), k])] });
+            const undel = k => set({ _deleted: (v._deleted || []).filter(x => x !== k) });
+            const isDel = k => (v._deleted || []).includes(k);
+            const save = () => db.collection('settings').doc('templates').set(v).then(() => { setDirty(false); showToast('تم حفظ الرسائل ✓'); }).catch(e => showToast(e.message));
+            const area = (k, rows = 4) => <textarea rows={rows} value={v[k] ?? ''} onChange={e => set({ [k]: e.target.value })} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl text-xs font-bold outline-none focus:border-gold-500" />;
+            const reset = k => <button type="button" onClick={() => set({ [k]: TPL_DEFAULT[k] })} className="text-[10px] text-gray-400 font-bold hover:text-gold-600">استرجاع النص الأصلي</button>;
+            const card = "bg-white p-4 rounded-[20px] border border-gray-100 shadow-sm space-y-1.5";
+            const block = (obj, delMsg) => Object.entries(obj).filter(([k]) => !isDel(k)).map(([k, [t0, vars]]) => (
+                <div key={k} className={card}>
+                    <EditableTitle value={title(k, t0)} onChange={t => setTitle(k, t)} onDelete={() => del(k)} deleteMsg={delMsg} />
                     <p className="text-[9px] text-gray-400 font-bold" dir="ltr">{vars}</p>
-                    <textarea rows="4" value={v[k] ?? ''} onChange={e => setV({ ...v, [k]: e.target.value })} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl text-xs font-bold outline-none focus:border-gold-500" />
-                    <button type="button" onClick={() => setV({ ...v, [k]: TPL_DEFAULT[k] })} className="text-[10px] text-gray-400 font-bold">استرجاع النص الأصلي</button>
+                    {area(k)}{reset(k)}
                 </div>));
+            const restoreList = (keys, names) => { const d = keys.filter(isDel); return d.length ? (
+                <div className="bg-gray-50 border border-dashed border-gray-200 rounded-[20px] p-3 space-y-1.5"><p className="text-[10px] font-black text-gray-500">قوالب محذوفة (مش بتتبعت):</p>
+                    {d.map(k => <div key={k} className="flex items-center justify-between text-xs font-bold text-gray-500"><span className="line-through">{title(k, names[k])}</span><button type="button" onClick={() => undel(k)} className="text-gold-600 font-black text-[11px]">↩ استرجاع</button></div>)}</div>) : null; };
+            const TABS = [['wa', 'واتساب'], ['tg', 'تيليجرام'], ['custom', 'رسائل مخصصة']];
+            const tgNames = { ...Object.fromEntries(Object.entries(TG_L).map(([k, x]) => [k, x[0]])), ...Object.fromEntries(Object.entries(GROUPS).map(([k, x]) => [k, x[0]])) };
             return (
                 <div className="space-y-4 w-full animate-fade-in">
-                    <h3 className="text-lg font-black text-gray-800">قوالب الرسائل (واتساب)</h3>
-                    <p className="text-[10px] font-bold text-gray-400">عدّلي النص، والكلمات بين أقواس {'{ }'} بتتبدل تلقائي. رابط التقييم بيتحط من خانة "رابط التقييم" في بيانات كل فرع.</p>
-                    {block(WA)}
-                    <h3 className="text-lg font-black text-gray-800 pt-2">رسائل تيليجرام (إشعارات الإدارة)</h3>
-                    <p className="text-[10px] font-bold text-gray-400">دي الرسائل اللي بتوصلك على تيليجرام. {'{by}'} هو اسم اللي سجّل. لو مسحتي كلمة من الأقواس بتختفي من الرسالة.</p>
-                    {block(TG_L)}
-                    <h3 className="text-lg font-black text-gray-800 pt-2">جدول مواعيد الصبح (تيليجرام)</h3>
-                    <p className="text-[10px] font-bold text-gray-400">الجدول بيتبني من 3 أجزاء: أول الرسالة، وعنوان لكل دكتور، وسطر لكل حجز. لو خانة فاضية (زي الخدمة) الفاصل اللي قبلها بيختفي لوحده.</p>
-                    {block(TG_SCHED)}
-                    <button type="button" onClick={save} className="w-full bg-gold-500 text-white py-3 rounded-xl font-black text-sm shadow-md">حفظ الرسائل</button>
+                    <div className="flex bg-gray-100 p-1 rounded-xl max-w-md">{TABS.map(([k, n]) => <button key={k} type="button" onClick={() => setTab(k)} className={`flex-1 px-3 py-2 text-xs font-black rounded-lg ${tab === k ? 'bg-white shadow text-gold-600' : 'text-gray-500'}`}>{n}</button>)}</div>
+
+                    {tab === 'wa' && <>
+                        <p className="text-[10px] font-bold text-gray-400">رسايل واتساب اللي بتتبعت للمرضى والمعامل من الزراير. الكلمات بين أقواس {'{ }'} بتتبدل تلقائي. لو حذفتي قالب، الزرار بتاعه بيختفي.</p>
+                        {block(WA, 'حذف القالب ده؟ الزرار بتاعه هيختفي من السيستم (تقدري ترجّعيه بعدين).')}
+                        {restoreList(Object.keys(WA), Object.fromEntries(Object.entries(WA).map(([k, x]) => [k, x[0]])))}
+                    </>}
+
+                    {tab === 'tg' && <>
+                        <p className="text-[10px] font-bold text-gray-400">رسايل تيليجرام. {'{by}'} هو اسم اللي سجّل. لو حذفتي قالب، الرسالة دي بتبطل تتبعت لحد ما ترجّعيه.</p>
+                        {block(TG_L, 'حذف القالب ده؟ الرسالة دي هتبطل تتبعت لأي حد (تقدري ترجّعيها بعدين).')}
+                        {Object.entries(GROUPS).filter(([g]) => !isDel(g)).map(([g, [t0, parts]]) => (
+                            <div key={g} className={card + ' space-y-3'}>
+                                <EditableTitle value={title(g, t0)} onChange={t => setTitle(g, t)} onDelete={() => del(g)} deleteMsg="حذف الجدول ده؟ هيبطل يتبعت (تقدري ترجّعيه بعدين)." />
+                                {parts.map(([k, n, vars, qk, qn]) => <div key={k} className="space-y-1 border-t border-gray-50 pt-2">
+                                    <p className="text-[11px] font-black text-gray-600">{n}</p>
+                                    <p className="text-[9px] text-gray-400 font-bold" dir="ltr">{vars}</p>
+                                    {area(k, 2)}
+                                    {qk && <label className="flex items-center gap-2 text-[11px] font-black text-gray-700 bg-amber-50 rounded-lg px-2.5 py-2 cursor-pointer"><input type="checkbox" checked={!!(v._quiet || {})[qk]} onChange={e => set({ _quiet: { ...(v._quiet || {}), [qk]: e.target.checked } })} />{qn}</label>}
+                                    {reset(k)}
+                                </div>)}
+                                <p className="text-[10px] text-gray-400 font-bold">لو خانة فاضية (زي الخدمة) الفاصل اللي قبلها بيختفي لوحده.</p>
+                            </div>))}
+                        {restoreList([...Object.keys(TG_L), ...Object.keys(GROUPS)], tgNames)}
+                    </>}
+
+                    {tab === 'custom' && (isSuper ? <CustomMsgsView showToast={showToast} data={data} /> : <p className="text-xs font-bold text-gray-400 bg-white rounded-xl p-4">الرسايل المخصصة للسوبر أدمن بس.</p>)}
+
+                    {tab !== 'custom' && <button type="button" onClick={save} disabled={!dirty} className="w-full bg-gold-500 text-white py-3 rounded-xl font-black text-sm shadow-md disabled:opacity-40">{dirty ? 'حفظ الرسائل' : 'محفوظ ✓'}</button>}
                 </div>
             );
         }
