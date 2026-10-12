@@ -1308,7 +1308,7 @@
                                                         {activeTab === 'labs' && <LabsView focusId={focus?.tab === 'labs' ? focus.id : null} cases={filteredData.labCases} costs={costs} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'lab', mode:'add'})} onEdit={(d)=>setModal({type:'lab', mode:'edit', data:d})} showToast={setToastMsg} />}
                             {activeTab === 'services' && isAdminOrSuper && <ServicesView services={data.services} specialties={data.specialties} staff={data.staff} showToast={setToastMsg} onConfirm={setConfirmAction} />}
                             {activeTab === 'consults' && <ConsultsView consults={currentUser.role === 'employee' ? data.consults.filter(c => !c.branchId || c.branchId === currentUser.branchId) : data.consults} branches={data.branches} staff={data.staff} specialties={data.specialties} currentUser={currentUser} focusId={focus?.tab === 'consults' ? focus.id : null} showToast={setToastMsg} />}
-                            {activeTab === 'settings' && isAdminOrSuper && <SettingsView sections={[{ k: 'branches', label: 'الفروع', node: <BranchesView branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'branch', mode:'add'})} onEdit={(d)=>setModal({type:'branch', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'templates', label: 'قوالب الرسائل', node: <TemplatesView showToast={setToastMsg} data={data} isSuper={isSuperAdmin} /> }, ...(isSuperAdmin ? [{ k: 'staff', label: 'الموظفين', node: <StaffView staff={staffFull} branches={data.branches} onConfirm={setConfirmAction} onAdd={(k)=>setModal({type:'staff', mode:'add', data:{kind:k}})} onEdit={(d)=>setModal({type:'staff', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'mycode', label: 'حسابي', node: <MasterCodeView currentUser={currentUser} showToast={setToastMsg} /> }, { k: 'backup', label: 'النسخ الاحتياطي', node: <BackupView showToast={setToastMsg} /> }, { k: 'telegram', label: 'تيليجرام', node: <TelegramView showToast={setToastMsg} branches={data.branches} staff={data.staff} /> }] : [])]} />}
+                            {activeTab === 'settings' && isAdminOrSuper && <SettingsView sections={[{ k: 'branches', label: 'الفروع', node: <BranchesView branches={data.branches} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'branch', mode:'add'})} onEdit={(d)=>setModal({type:'branch', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'templates', label: 'قوالب الرسائل', node: <TemplatesView showToast={setToastMsg} data={data} isSuper={isSuperAdmin} /> }, ...(isSuperAdmin ? [{ k: 'staff', label: 'الموظفين', node: <StaffView staff={staffFull} branches={data.branches} onConfirm={setConfirmAction} onAdd={(k)=>setModal({type:'staff', mode:'add', data:{kind:k}})} onEdit={(d)=>setModal({type:'staff', mode:'edit', data:d})} showToast={setToastMsg} /> }, { k: 'mycode', label: 'حسابي', node: <MasterCodeView currentUser={currentUser} showToast={setToastMsg} /> }, { k: 'backup', label: 'النسخ الاحتياطي', node: <BackupView showToast={setToastMsg} /> }, { k: 'telegram', label: 'تيليجرام', node: <div className="space-y-4"><SendTimesCard showToast={setToastMsg} /><TelegramView showToast={setToastMsg} branches={data.branches} staff={data.staff} /></div> }] : [])]} />}
                             {activeTab === 'dues' && !isDoctor && <DuesView focusIds={focus?.tab === 'dues' ? focus.ids : null} items={filteredData.dues} branches={data.branches} currentUser={currentUser} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'due', mode:'add'})} onEdit={(d)=>setModal({type:'due', mode:'edit', data:d})} showToast={setToastMsg} />}
                                                         {activeTab === 'consumables' && isAdminOrSuper && <ConsumablesView allItems={data.consumables} items={filteredData.consumables} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onAdd={()=>setModal({type:'consumable', mode:'add', data:{kind:'purchase'}})} onEdit={(d)=>setModal({type:'consumable', mode:'edit', data:d})} showToast={setToastMsg} />}
                             {activeTab === 'shortages' && !isDoctor && <ShortagesView focusIds={focus?.tab === 'shortages' ? focus.ids : null} onBuy={(it)=> !isAdminOrSuper ? setConfirmAction({msg:'هل تم توفير وشراء هذا الصنف؟', onConfirm:()=>db.collection('shortages').doc(it.id).delete().then(()=>setToastMsg('تم')).catch(err=>setToastMsg('مشكلة: '+err.message))}) : quickBuy(it)} shortages={filteredData.shortages} branches={data.branches} currentUser={currentUser} selectedBranch={selectedBranch} onConfirm={setConfirmAction} onEdit={(d)=>setModal({type:'shortage', mode:'edit', data:d})} showToast={setToastMsg} />}
@@ -2632,6 +2632,29 @@
             );
         }
 
+        // مواعيد إرسال رسايل تيليجرام (جدول الصبح + النواقص) — بتظهر في: الإعدادات ← تيليجرام، وفي قوالب الرسائل ← تيليجرام
+        function SendTimesCard({ showToast }) {
+            const [tm, setTm] = useState(() => tgTimes());
+            const [dirty, setDirty] = useState(false);
+            const setT = p => { setTm(x => ({ ...x, ...p })); setDirty(true); };
+            const save = () => { const t = { sched: Number(tm.sched), short: Number(tm.short), shortMode: tm.shortMode }; db.collection('settings').doc('templates').set({ _times: t }, { merge: true }).then(() => { TPL._times = t; setDirty(false); showToast('تم حفظ مواعيد الإرسال ✓'); }).catch(e => showToast(e.message)); };
+            const hrTxt = h => (h % 12 || 12) + (h < 12 ? ' الصبح' : h < 17 ? ' الضهر' : ' بالليل');
+            const selC = "bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5 text-xs font-black outline-none focus:border-gold-500";
+            const sel = (val, on) => <select value={val} onChange={e => on(Number(e.target.value))} className={selC}>{Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{hrTxt(h)}</option>)}</select>;
+            return (
+                <div className="bg-white p-4 rounded-[20px] border-2 border-gold-200 shadow-sm space-y-3">
+                    <p className="text-sm font-black text-gray-800">⏰ مواعيد إرسال رسايل تيليجرام</p>
+                    <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-gray-700"><span>جدول المواعيد + ملخص الصبح بيتبعتوا الساعة</span>{sel(tm.sched, h => setT({ sched: h }))}</div>
+                    <p className="text-[10px] text-gray-400 font-bold">حجز السكرتارية لنفس اليوم بيتبعت لوحده بس بعد ما الجدول ده يتبعت. حجوزات بكرة وبعده بتيجي في جدول يومها.</p>
+                    <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-gray-700"><span>رسايل النواقص:</span>
+                        <select value={tm.shortMode} onChange={e => setT({ shortMode: e.target.value })} className={selC}><option value="daily">مجمّعة مرة واحدة في اليوم</option><option value="instant">فوراً مع كل نقص</option></select>
+                        {tm.shortMode === 'daily' && <><span>الساعة</span>{sel(tm.short, h => setT({ short: h }))}</>}</div>
+                    {tm.shortMode === 'daily' && <p className="text-[10px] text-gray-400 font-bold">بيتبعت لكل فرع (وللمخزن) لستة بكل النواقص المفتوحة عشان تتشترى مرة واحدة. لو مفيش نواقص مش بيتبعت حاجة.</p>}
+                    <button type="button" onClick={save} disabled={!dirty} className="w-full bg-gold-500 text-white py-2.5 rounded-xl font-black text-sm shadow-md disabled:opacity-40">{dirty ? 'حفظ المواعيد' : 'محفوظ ✓'}</button>
+                </div>
+            );
+        }
+
         function TemplatesView({ showToast, data, isSuper }) {
             const [v, setV] = useState(() => ({ _titles: {}, _deleted: [], _quiet: { ...(TG.quiet || {}) }, ...JSON.parse(JSON.stringify(TPL)) }));
             const [tab, setTab] = useState('wa');
@@ -2649,7 +2672,7 @@
             const del = k => set({ _deleted: [...new Set([...(v._deleted || []), k])] });
             const undel = k => set({ _deleted: (v._deleted || []).filter(x => x !== k) });
             const isDel = k => (v._deleted || []).includes(k);
-            const save = () => db.collection('settings').doc('templates').set(v).then(() => { setDirty(false); showToast('تم حفظ الرسائل ✓'); }).catch(e => showToast(e.message));
+            const save = () => db.collection('settings').doc('templates').set({ ...v, ...(TPL._times ? { _times: TPL._times } : {}) }).then(() => { setDirty(false); showToast('تم حفظ الرسائل ✓'); }).catch(e => showToast(e.message));
             const area = (k, rows = 4) => <textarea rows={rows} value={v[k] ?? ''} onChange={e => set({ [k]: e.target.value })} className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl text-xs font-bold outline-none focus:border-gold-500" />;
             const reset = k => <button type="button" onClick={() => set({ [k]: TPL_DEFAULT[k] })} className="text-[10px] text-gray-400 font-bold hover:text-gold-600">استرجاع النص الأصلي</button>;
             const card = "bg-white p-4 rounded-[20px] border border-gray-100 shadow-sm space-y-1.5";
@@ -2676,19 +2699,7 @@
 
                     {tab === 'tg' && <>
                         <p className="text-[10px] font-bold text-gray-400">رسايل تيليجرام. {'{by}'} هو اسم اللي سجّل. لو حذفتي قالب، الرسالة دي بتبطل تتبعت لحد ما ترجّعيه.</p>
-                        {(() => { const tm = { sched: 9, short: 21, shortMode: 'daily', ...(v._times || {}) }; const setT = p => set({ _times: { ...tm, ...p } });
-                            const hrTxt = h => (h % 12 || 12) + (h < 12 ? ' الصبح' : h < 17 ? ' الضهر' : ' بالليل');
-                            const sel = (val, on) => <select value={val} onChange={e => on(Number(e.target.value))} className="bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5 text-xs font-black outline-none focus:border-gold-500">{Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{hrTxt(h)}</option>)}</select>;
-                            return <div className={card + ' space-y-3 border-gold-200'}>
-                                <p className="text-sm font-black text-gray-800">⏰ مواعيد الإرسال</p>
-                                <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-gray-700"><span>جدول المواعيد + ملخص الصبح بيتبعتوا الساعة</span>{sel(tm.sched, h => setT({ sched: h }))}</div>
-                                <p className="text-[10px] text-gray-400 font-bold">حجز السكرتارية لنفس اليوم بيتبعت لوحده بس بعد ما الجدول ده يتبعت. حجوزات بكرة وبعده بتيجي في جدول يومها.</p>
-                                <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-gray-700"><span>رسايل النواقص:</span>
-                                    <select value={tm.shortMode} onChange={e => setT({ shortMode: e.target.value })} className="bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5 text-xs font-black outline-none focus:border-gold-500"><option value="daily">مجمّعة مرة واحدة في اليوم</option><option value="instant">فوراً مع كل نقص</option></select>
-                                    {tm.shortMode === 'daily' && <><span>الساعة</span>{sel(tm.short, h => setT({ short: h }))}</>}</div>
-                                {tm.shortMode === 'daily' && <p className="text-[10px] text-gray-400 font-bold">بيتبعت لكل فرع (وللمخزن) لستة بكل النواقص المفتوحة عشان تتشترى مرة واحدة. لو مفيش نواقص مش بيتبعت حاجة.</p>}
-                                <p className="text-[10px] text-amber-600 font-bold">بعد الحفظ، سكريبت جوجل بياخد المواعيد الجديدة لوحده (مش محتاجة تعملي حاجة هناك).</p>
-                            </div>; })()}
+                        <SendTimesCard showToast={showToast} />
                         {block(TG_L, 'حذف القالب ده؟ الرسالة دي هتبطل تتبعت لأي حد (تقدري ترجّعيها بعدين).')}
                         {Object.entries(GROUPS).filter(([g]) => !isDel(g)).map(([g, [t0, parts]]) => (
                             <div key={g} className={card + ' space-y-3'}>
