@@ -193,7 +193,7 @@
         // السوبر أدمن يحطه من: الإعدادات → تيليجرام.
         // أنواع الإشعارات، وكل نوع بيروح للإدارة (الشات الرئيسي) و/أو لسكرتارية الفرع حسب الإعدادات
         const TG_KINDS = [
-            ['booking', 'حجز جديد من السيستم'], ['online', 'حجز أونلاين جديد (الموقع / صفحة الحجز)'], ['unsched', 'حجز أونلاين محتاج تظبيط ميعاد (مفيش دكتور فاضي)'], ['cancel', 'كنسل أو تأجيل'], ['reschedule', 'تعديل ميعاد حجز'],
+            ['booking', 'حجز جديد من السيستم (لنفس اليوم بعد جدول الصبح بس)'], ['online', 'حجز أونلاين جديد (الموقع / صفحة الحجز)'], ['unsched', 'حجز أونلاين محتاج تظبيط ميعاد (مفيش دكتور فاضي)'], ['cancel', 'كنسل أو تأجيل'], ['reschedule', 'تعديل ميعاد حجز'],
             ['follow', 'موعد متابعة مريض'], ['lab', 'تذكير حالة معمل'], ['shortage', 'نقص جديد'], ['due', 'فاتورة / مستحق جديد'], ['digest', 'ملخص الصبح اليومي (أرقام)'], ['schedule', 'جدول مواعيد النهاردة'], ['consult', 'استشارة أونلاين (جديدة + الرد عليها)']
         ];
         const ALL_KINDS = TG_KINDS.map(k => k[0]);
@@ -403,6 +403,7 @@
             followup: 'أهلاً {name}، معاك {branch} 👋\nحبينا نطمّن ونتابع معاك بخصوص {service}. تحب نحجزلك موعد؟',
             lab: 'السلام عليكم، بخصوص حالة المريض {patient} ({case}) المُسلّمة لكم بتاريخ {date}. برجاء الإفادة بموعد التسليم.',
             tgApp: '📅 حجز جديد — فرع {branch}\nالمريض: {patient}\nالموعد: {date} {time}\nالخدمة: {service}\nالدكتور: {doctor}\nبواسطة: {by}\n\n📊 إجمالي حجوزات {date} في {branch}: {count}',
+            tgShortDaily: '🛒 نواقص {branch} — {date}\n{count} صنف محتاجين يتشتروا:\n{list}',
             tgShortage: '⚠️ نقص جديد — {branch}\nالصنف: {item} ({qty})\nبواسطة: {by}\n\n📊 إجمالي النواقص في {branch}: {count}',
             tgDue: '🧾 فاتورة جديدة — {branch}\nالجهة: {party}\nالمبلغ: {amount} ج\nموعد السداد: {due}\nبواسطة: {by}\n\n📊 إجمالي المستحق في {branch}: {sum} ج ({count} فاتورة)',
             tgLab: '⏰ حالة معمل مر عليها {days} — اطلبيها من المعمل\nالمعمل: {lab}\nالمريض: {patient}\nالنوع: {case}\nالفرع: {branch}',
@@ -429,6 +430,10 @@
             tgDue: '🧾 فاتورة/مستحق جديد\nالجهة: {party}\nالمبلغ: {amount} ج\nموعد السداد: {due}\nالفرع: {branch}\nبواسطة: {by}'
         };
         const TPL = { ...TPL_DEFAULT };
+        // مواعيد الإرسال (الأدمن بيحددها من: قوالب الرسائل ← تيليجرام). sched = جدول الصبح، short = النواقص المجمّعة
+        const tgTimes = () => { const t = { sched: 9, short: 21, shortMode: 'daily', ...(TPL._times || {}) }; t.sched = Number(t.sched); t.short = Number(t.short); return t; };
+        const SHORT_STORE = { id: 'store', name: 'المخزن' };
+        const shortDailyText = (b, list, date) => fillT('tgShortDaily', { branch: b.id === 'store' ? 'المخزن' : 'فرع ' + b.name, date, count: list.length, list: list.map(x => '• ' + x.itemName + (x.quantity ? ' — ' + x.quantity : '') + (x.requestedBy ? ' (' + x.requestedBy + ')' : '')).join('\n') });
         // القوالب المحذوفة: الرسالة دي مش بتتبعت/زرارها مش بيظهر. _quiet = متبعتش الجدول لو فاضي
         const tplOn = k => !((TPL._deleted || []).includes(k));
         const TPL_KIND = { tgApp: 'booking', tgOnline: 'online', tgUnsched: 'unsched', tgCancel: 'cancel', tgResched: 'reschedule', tgFollow: 'follow', tgLab: 'lab', tgShortage: 'shortage', tgDue: 'due', tgDigest: 'digest', tgConsult: 'consult' };
@@ -692,12 +697,16 @@
             const [confirmAction, setConfirmAction] = useState(null);
             const [toastMsg, setToastMsg] = useState(null);
             const [alerts, setAlerts] = useState([]);
-            const [, setTplVer] = useState(0);
+            const [tplVer, setTplVer] = useState(0);
             const [events, setEvents] = useState([]);
             const [focus, setFocus] = useState(null);
             const userRef = useRef(null); userRef.current = currentUser;
             LIVE.appointments = data.appointments; LIVE.dues = data.dues; LIVE.shortages = data.shortages; LIVE.branches = data.branches; LIVE.staff = data.staff;
             const firstSnap = useRef({});
+            const morningDone = useRef('');
+            // بيصحّي الإشعارات اللي ليها ميعاد (جدول الصبح / النواقص) كل دقيقة لو السيستم مفتوح
+            const [clockTick, setClockTick] = useState(0);
+            useEffect(() => { const t = setInterval(() => setClockTick(x => x + 1), 60000); return () => clearInterval(t); }, []);
             const evVisible = (kind, x, u) => {
                 if (kind === 'dues' && u.role !== 'admin' && u.role !== 'superadmin') return false;
                 if (u.role === 'employee' && x.branchId !== u.branchId) return false;
@@ -843,8 +852,9 @@
             // ملخص الصبح لكل فرع (مرة واحدة في اليوم، بعد 9 الصبح، أول ما أي حد من المكتب يفتح السيستم)
             useEffect(() => {
                 if (!currentUser || currentUser.role === 'doctor' || !TG.token || !firstSnap.current.appointments || !data.branches.length) return;
-                if (new Date().getHours() < 9) return;
+                if (new Date().getHours() < tgTimes().sched) return;
                 const today = localDay(), tmr = addDays(1);
+                if (morningDone.current === today) return; morningDone.current = today;
                 data.branches.forEach(b => {
                     const ref = db.collection('tg_log').doc('digest_' + b.id + '_' + today);
                     db.runTransaction(async tx => { const sn = await tx.get(ref); if (sn.exists) return false; tx.set(ref, { at: Date.now() }); return true; }).then(won => {
@@ -870,7 +880,24 @@
                     db.runTransaction(async tx => { const sn = await tx.get(dref); if (sn.exists) return false; tx.set(dref, { at: Date.now() }); return true; })
                         .then(won => { if (won) sendPersonSchedule(t, data.branches, data.appointments, today); }).catch(() => {});
                 });
-            }, [data.appointments, data.branches, currentUser, tgReady]);
+            }, [data.appointments, data.branches, currentUser, tgReady, clockTick]);
+
+            // النواقص المجمّعة: مرة واحدة في اليوم في الساعة اللي الأدمن حددها، لكل فرع (والمخزن) — كل النواقص المفتوحة
+            const shortsDone = useRef('');
+            useEffect(() => {
+                if (!currentUser || currentUser.role === 'doctor' || !TG.token || !firstSnap.current.shortages || !data.branches.length) return;
+                const tt = tgTimes(); if (tt.shortMode !== 'daily' || (TPL._deleted || []).includes('tgShortDaily') || new Date().getHours() < tt.short) return;
+                const today = localDay(); if (shortsDone.current === today) return; shortsDone.current = today;
+                const dTxt = new Intl.DateTimeFormat('ar-EG', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date());
+                [...data.branches, SHORT_STORE].forEach(b => {
+                    const ref = db.collection('tg_log').doc('shorts_' + b.id + '_' + today);
+                    db.runTransaction(async tx => { const sn = await tx.get(ref); if (sn.exists) return false; tx.set(ref, { at: Date.now() }); return true; }).then(won => {
+                        if (!won) return;
+                        const list = data.shortages.filter(x => x.branchId === b.id);
+                        if (list.length) tgSend(shortDailyText(b, list, dTxt), b.id, 'shortage');
+                    }).catch(() => {});
+                });
+            }, [data.shortages, data.branches, currentUser, tgReady, clockTick, tplVer]);
 
             // الرسايل المخصصة: بنشيك كل دقيقة لو فيه رسالة جه ميعادها (مرة واحدة لكل رسالة في اليوم)
             const [customMsgs, setCustomMsgs] = useState([]);
@@ -1614,7 +1641,7 @@
                 e.preventDefault();
                 if (!itemName || !quantity) return;
                 db.collection('shortages').add({ itemName, quantity, branchId, requestedBy: currentUser.name, timestamp: new Date().toISOString() })
-                .then(ref => { const bn = branches.find(b => b.id === branchId)?.name || ''; tgSend(tgText('shortages', { itemName, quantity, branchId }, bn, '', currentUser.name, ref.id), branchId, 'shortage'); setItemName(''); setQuantity(''); showToast("تم إضافة الصنف للمخزن"); })
+                .then(ref => { const bn = branches.find(b => b.id === branchId)?.name || ''; if (tgTimes().shortMode === 'instant') tgSend(tgText('shortages', { itemName, quantity, branchId }, bn, '', currentUser.name, ref.id), branchId, 'shortage'); setItemName(''); setQuantity(''); showToast("تم إضافة الصنف للمخزن"); })
                 .catch(err => showToast("مشكلة في إضافة صنف: " + err.message));
             };
 
@@ -2610,7 +2637,7 @@
             const [tab, setTab] = useState('wa');
             const [dirty, setDirty] = useState(false);
             const WA = { consultReply: ['رد الاستشارة للمريض', '{name} {doctor} {reply}'], reminder: ['تذكير الموعد', '{name} {branch} {date} {time}'], review: ['طلب التقييم', '{name} {branch} {link}'], followup: ['متابعة المريض', '{name} {branch} {service}'], lab: ['رسالة المعمل', '{patient} {case} {date}'] };
-            const TG_L = { tgConsult: ['استشارة أونلاين جديدة', '{code} {patient} {phone} {branch} {topic} {doctor} {question}'], tgConsultReply: ['تم الرد على استشارة', '{code} {patient} {by} {reply}'], tgResched: ['تعديل ميعاد حجز', '{patient} {phone} {oldDate} {oldTime} {oldDoctor} {date} {time} {doctor} {branch} {by}'], tgApp: ['حجز جديد', '{patient} {date} {time} {service} {doctor} {branch} {by} | {count} = حجوزات نفس اليوم في الفرع، {countAll} = كل الفروع'], tgShortage: ['نقص جديد', '{item} {qty} {branch} {by} | {count} = نواقص الفرع، {countAll} = كل الفروع'], tgDue: ['فاتورة / مستحق جديد', '{party} {amount} {due} {branch} {by} | {sum} = إجمالي المستحق للفرع، {count} = عدد الفواتير، {sumAll} و{countAll} = كل الفروع'], tgLab: ['تذكير المعمل', '{days} {lab} {patient} {case} {branch}'], tgFollow: ['موعد متابعة مريض', '{patient} {service} {branch}'] , tgOnline: ['حجز أونلاين جديد', '{patient} {phone} {date} {time} {service} {doctor} {code} {branch} | {count} = حجوزات نفس اليوم في الفرع'], tgUnsched: ['حجز أونلاين محتاج تظبيط ميعاد', '{patient} {phone} {date} {time} {service} {code} {branch}'], tgCancel: ['كنسل أو تأجيل', '{kind} {patient} {phone} {date} {time} {service} {doctor} {branch}'], tgDigest: ['ملخص الصبح اليومي', '{branch} {date} {today} {online} {tomorrow} {follow} {lab} {short}'] };
+            const TG_L = { tgConsult: ['استشارة أونلاين جديدة', '{code} {patient} {phone} {branch} {topic} {doctor} {question}'], tgConsultReply: ['تم الرد على استشارة', '{code} {patient} {by} {reply}'], tgResched: ['تعديل ميعاد حجز', '{patient} {phone} {oldDate} {oldTime} {oldDoctor} {date} {time} {doctor} {branch} {by}'], tgApp: ['حجز جديد (من السيستم — لنفس اليوم بعد جدول الصبح بس)', '{patient} {date} {time} {service} {doctor} {branch} {by} | {count} = حجوزات نفس اليوم في الفرع، {countAll} = كل الفروع'], tgShortage: ['نقص جديد (لو النواقص على "فوراً")', '{item} {qty} {branch} {by} | {count} = نواقص الفرع، {countAll} = كل الفروع'], tgShortDaily: ['النواقص المجمّعة (مرة في اليوم)', '{branch} {date} {count} {list}'], tgDue: ['فاتورة / مستحق جديد', '{party} {amount} {due} {branch} {by} | {sum} = إجمالي المستحق للفرع، {count} = عدد الفواتير، {sumAll} و{countAll} = كل الفروع'], tgLab: ['تذكير المعمل', '{days} {lab} {patient} {case} {branch}'], tgFollow: ['موعد متابعة مريض', '{patient} {service} {branch}'] , tgOnline: ['حجز أونلاين جديد', '{patient} {phone} {date} {time} {service} {doctor} {code} {branch} | {count} = حجوزات نفس اليوم في الفرع'], tgUnsched: ['حجز أونلاين محتاج تظبيط ميعاد', '{patient} {phone} {date} {time} {service} {code} {branch}'], tgCancel: ['كنسل أو تأجيل', '{kind} {patient} {phone} {date} {time} {service} {doctor} {branch}'], tgDigest: ['ملخص الصبح اليومي', '{branch} {date} {today} {online} {tomorrow} {follow} {lab} {short}'] };
             // جدول الصبح: مجموعتين (كل مجموعة بتتحذف/تتسمّى مع بعض)
             const GROUPS = {
                 grpSched: ['جدول مواعيد الصبح (الإدارة / الفروع / الأدمنز)', [['tgSchedHead', 'أول الرسالة', '{branch} {date} {count} {canceled}'], ['tgSchedDoctor', 'عنوان كل دكتور', '{doctor} {count}'], ['tgSchedLine', 'سطر كل حجز', '{time} {patient} {service} {phone} {status} {online}'], ['tgSchedEmpty', 'لو مفيش حجوزات', '{branch} {date} {canceled}', 'branch', 'متبعتش جدول الفرع لو مفيهوش حجوزات']]],
@@ -2649,6 +2676,19 @@
 
                     {tab === 'tg' && <>
                         <p className="text-[10px] font-bold text-gray-400">رسايل تيليجرام. {'{by}'} هو اسم اللي سجّل. لو حذفتي قالب، الرسالة دي بتبطل تتبعت لحد ما ترجّعيه.</p>
+                        {(() => { const tm = { sched: 9, short: 21, shortMode: 'daily', ...(v._times || {}) }; const setT = p => set({ _times: { ...tm, ...p } });
+                            const hrTxt = h => (h % 12 || 12) + (h < 12 ? ' الصبح' : h < 17 ? ' الضهر' : ' بالليل');
+                            const sel = (val, on) => <select value={val} onChange={e => on(Number(e.target.value))} className="bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5 text-xs font-black outline-none focus:border-gold-500">{Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{hrTxt(h)}</option>)}</select>;
+                            return <div className={card + ' space-y-3 border-gold-200'}>
+                                <p className="text-sm font-black text-gray-800">⏰ مواعيد الإرسال</p>
+                                <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-gray-700"><span>جدول المواعيد + ملخص الصبح بيتبعتوا الساعة</span>{sel(tm.sched, h => setT({ sched: h }))}</div>
+                                <p className="text-[10px] text-gray-400 font-bold">حجز السكرتارية لنفس اليوم بيتبعت لوحده بس بعد ما الجدول ده يتبعت. حجوزات بكرة وبعده بتيجي في جدول يومها.</p>
+                                <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-gray-700"><span>رسايل النواقص:</span>
+                                    <select value={tm.shortMode} onChange={e => setT({ shortMode: e.target.value })} className="bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5 text-xs font-black outline-none focus:border-gold-500"><option value="daily">مجمّعة مرة واحدة في اليوم</option><option value="instant">فوراً مع كل نقص</option></select>
+                                    {tm.shortMode === 'daily' && <><span>الساعة</span>{sel(tm.short, h => setT({ short: h }))}</>}</div>
+                                {tm.shortMode === 'daily' && <p className="text-[10px] text-gray-400 font-bold">بيتبعت لكل فرع (وللمخزن) لستة بكل النواقص المفتوحة عشان تتشترى مرة واحدة. لو مفيش نواقص مش بيتبعت حاجة.</p>}
+                                <p className="text-[10px] text-amber-600 font-bold">بعد الحفظ، سكريبت جوجل بياخد المواعيد الجديدة لوحده (مش محتاجة تعملي حاجة هناك).</p>
+                            </div>; })()}
                         {block(TG_L, 'حذف القالب ده؟ الرسالة دي هتبطل تتبعت لأي حد (تقدري ترجّعيها بعدين).')}
                         {Object.entries(GROUPS).filter(([g]) => !isDel(g)).map(([g, [t0, parts]]) => (
                             <div key={g} className={card + ' space-y-3'}>
@@ -3134,7 +3174,12 @@
                     db.collection(col).add(d)
                       .then(ref => { saveCost(ref.id);
                           if (col === 'appointments' || col === 'shortages' || col === 'dues') { const bn = branches.find(b => b.id === d.branchId)?.name || ''; const dn = staff.find(x => x.id === d.doctorId)?.name;
-                              tgSend(tgText(col, d, bn, dn, user.name, ref.id), d.branchId, col === 'appointments' ? 'booking' : col === 'dues' ? 'due' : 'shortage', d.doctorId); }
+                              const go = () => tgSend(tgText(col, d, bn, dn, user.name, ref.id), d.branchId, col === 'appointments' ? 'booking' : col === 'dues' ? 'due' : 'shortage', d.doctorId);
+                              // حجز السكرتارية: بيتبعت بس لو لنفس اليوم و"جدول النهاردة" بتاع الفرع اتبعت خلاص (بعد ساعة جدول الصبح).
+                              // قبلها، أو لو الحجز لبكرة وبعده: مش بيتبعت لأنه هييجي في جدول الصبح بتاع يومه
+                              if (col === 'shortages') { if (tgTimes().shortMode === 'instant') go(); }
+                              else if (col !== 'appointments') go();
+                              else if (d.date === localDay()) { if (new Date().getHours() >= tgTimes().sched + 1) go(); else db.collection('tg_log').doc('schedule_' + d.branchId + '_' + d.date).get().then(sn => { if (sn.exists) go(); }).catch(() => {}); } }
                           if (modal.data?.fromShortage) db.collection('shortages').doc(modal.data.fromShortage).delete().catch(()=>{}); onClose(); showToast("تمت الإضافة بنجاح"); })
                       .catch(err => showToast("مشكلة في الإضافة! تفاصيل الخطأ: " + err.message));
                 }
