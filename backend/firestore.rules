@@ -1,0 +1,275 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===== صاحبة الموقع (لوحة الأدمن بتاعة الموقع بتدخل بالإيميل ده) =====
+    function isOwner() {
+      return request.auth != null
+        && request.auth.token.email == 'neweradentalclinics@gmail.com';
+    }
+
+    // ===== موظفين العيادة (دخلوا بكودهم، وليهم مستند في staff_auth) =====
+    function staffDoc() {
+      return /databases/$(database)/documents/staff_auth/$(request.auth.uid);
+    }
+    function isStaffUser() {
+      return request.auth != null
+        && request.auth.token.firebase.sign_in_provider == 'password'
+        && exists(staffDoc());
+    }
+    function staffRole() { return get(staffDoc()).data.role; }
+    function myStaffId() { return get(staffDoc()).data.staffId; }
+
+    function isStaff()  { return isOwner() || isStaffUser(); }
+    // موظفين المكتب (سكرتارية/تمريض/مدير/سوبر) = كل الموظفين ما عدا الأطباء
+    function isOffice() { return isOwner() || (isStaffUser() && staffRole() != 'doctor'); }
+    function isDoctor() { return isStaffUser() && staffRole() == 'doctor'; }
+    function isAdmin()  { return isOwner() || (isStaffUser() && (staffRole() == 'admin' || staffRole() == 'superadmin')); }
+    function isSuper()  { return isOwner() || (isStaffUser() && staffRole() == 'superadmin'); }
+
+    function appDoc(id) { return /databases/$(database)/documents/appointments/$(id); }
+
+    // ===== الإعدادات: القراءة للكل (قوالب + إعدادات الموقع) والكتابة للأدمن =====
+    match /settings/{doc} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // ===== إعدادات سرية (توكن تيليجرام): للسوبر أدمن بس =====
+    match /private_config/{doc} {
+      // التوكن والإعدادات: السوبر أدمن بس (الرسايل بتتبعت من سكريبت جوجل مش من أجهزة الموظفين)
+      allow read: if isSuper();
+      allow write: if isSuper();
+    }
+
+    // ===== بيانات حجز المريض (صفحة الحجز + الموقع) =====
+    function validOnline(d) {
+      return d.patientName is string && d.patientName.size() > 0 && d.patientName.size() <= 100
+        && d.phone is string && d.phone.size() > 0 && d.phone.size() <= 30
+        && d.branchId is string && d.branchId.size() > 0 && d.branchId.size() <= 40
+        && d.doctorId is string && d.doctorId.size() > 0 && d.doctorId.size() <= 40
+        && d.doctorName is string && d.doctorName.size() <= 100
+        && d['service'] is string && d['service'].size() <= 200
+        && d.date is string && d.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && d.time is string && d.time.matches('^[0-9]{1,2}:[0-9]{2}$')
+        && (!('serviceIds' in d) || (d.serviceIds is list && d.serviceIds.size() <= 20))
+        && (!('estimate' in d) || (d.estimate is string && d.estimate.size() <= 80))
+        && (!('extra' in d) || (d.extra is map && d.extra.size() <= 20))
+        && (!('needsSchedule' in d) || d.needsSchedule is bool);
+    }
+
+    // ----- الحجوزات -----
+    match /appointments/{id} {
+      // المكتب: كل الحجوزات
+      allow read, write: if isOffice();
+      // الطبيب: حجوزاته هو بس، ويغيّر الحالة بس
+      allow read: if isDoctor() && resource.data.doctorId == myStaffId();
+      allow update: if isDoctor() && resource.data.doctorId == myStaffId()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','statusChangedAt']);
+
+      // المريض: يفتح/يعدل/يلغي حجزه الأونلاين بس (برقم المستند اللي بيوصله من كود الحجز)
+      allow get: if resource.data.source == 'online';
+      allow create: if request.resource.data.keys().hasOnly(['patientName','phone','branchId','doctorId','doctorName','service','serviceIds','estimate','extra','needsSchedule','date','time','bookingCode','source','status','createdAt','phoneKey','pbTok'])
+        // حد الحجوزات لكل رقم: الحجز لازم يكون متسجل في phone_book بتاع نفس الرقم (اللي مبيقبلش أكتر من 2)
+        && request.resource.data.phoneKey is string && request.resource.data.phoneKey.matches('^[0-9]{10}$')
+        && request.resource.data.phone.matches('^[+]?[0-9]*' + request.resource.data.phoneKey + '$')
+        && request.resource.data.pbTok is string
+        && request.resource.data.pbTok in getAfter(/databases/$(database)/documents/phone_book/$(request.resource.data.phoneKey)).data.toks
+        && request.resource.data.source == 'online'
+        && request.resource.data.status == 'unconfirmed'
+        && request.resource.data.bookingCode is string
+        && request.resource.data.bookingCode.matches('^[A-Z0-9]{5,12}$')
+        && validOnline(request.resource.data);
+      // المريض يعدّل حجزه، أو يلغيه (الحالة بتبقى "كنسل" بس — مش بيقدر يغيّرها لحاجة تانية، ولا يعدّل حجز ملغي)
+      allow update: if resource.data.source == 'online'
+        && resource.data.status != 'canceled'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['patientName','phone','branchId','doctorId','doctorName','service','serviceIds','estimate','extra','needsSchedule','date','time','status','canceledAt','canceledBy','rescheduledAt','rescheduledBy','prevDate','prevTime','prevDoctorId','prevDoctorName'])
+        && (request.resource.data.status == resource.data.status || request.resource.data.status == 'canceled')
+        && validOnline(request.resource.data);
+      allow delete: if resource.data.source == 'online';
+    }
+
+    // ----- حجوزات كل رقم موبايل (حد أقصى 2 جايين) — مفيهاش بيانات مرضى: تواريخ وعلامات بس -----
+    match /phone_book/{k} {
+      allow get: if true;
+      allow create, update: if k.matches('^[0-9]{10}$')
+        && request.resource.data.keys().hasOnly(['list','toks','at'])
+        && request.resource.data.list is list && request.resource.data.list.size() <= 2
+        && request.resource.data.toks is list && request.resource.data.toks.size() <= 2;
+      allow list, delete: if isStaff();
+    }
+
+    // ----- كود الحجز -> رقم الحجز -----
+    match /online_bookings/{code} {
+      allow get: if true;
+      allow list, update: if isStaff();
+      // لازم الكود يطابق حجز حقيقي بنفس الكود (مفيش أكواد وهمية)
+      allow create: if isStaff()
+        || (code.matches('^[A-Z0-9]{5,12}$')
+            && request.resource.data.keys().hasOnly(['appointmentId'])
+            && request.resource.data.appointmentId is string
+            && getAfter(appDoc(request.resource.data.appointmentId)).data.bookingCode == code);
+      // المريض يمسح الكود بس لو الحجز نفسه اتمسح في نفس العملية
+      allow delete: if isStaff() || !existsAfter(appDoc(resource.data.appointmentId));
+    }
+
+    // ----- الأوقات المحجوزة (بدون أي بيانات مرضى) -----
+    match /booked_slots/{slot} {
+      allow read: if true;
+      // المريض يحجز وقت بس لو فيه حجز حقيقي بنفس الفرع/الدكتور/اليوم/الساعة في نفس العملية
+      allow create: if isStaff()
+        || (request.resource.data.keys().hasOnly(['branchId','doctorId','date','time','at','appId'])
+            && request.resource.data.branchId is string
+            && request.resource.data.doctorId is string && request.resource.data.doctorId.size() > 0
+            && request.resource.data.date is string
+            && request.resource.data.time is string
+            && request.resource.data.at is number
+            && request.resource.data.appId is string
+            && slot == request.resource.data.branchId + '_' + request.resource.data.doctorId + '_' + request.resource.data.date + '_' + request.resource.data.time
+            && getAfter(appDoc(request.resource.data.appId)).data.branchId == request.resource.data.branchId
+            && getAfter(appDoc(request.resource.data.appId)).data.doctorId == request.resource.data.doctorId
+            && getAfter(appDoc(request.resource.data.appId)).data.date == request.resource.data.date
+            && getAfter(appDoc(request.resource.data.appId)).data.time == request.resource.data.time);
+      // المسح للموظفين بس (السيستم بيفضّي الأوقات الملغية لوحده)
+      allow update, delete: if isStaff();
+    }
+
+    // ----- بيانات عامة -----
+    // ----- التخصصات والخدمات والأسعار: الكل يشوفها، والأدمن يعدّل -----
+    match /specialties/{id} { allow read: if true; allow write: if isAdmin(); }
+    match /services/{id}    { allow read: if true; allow write: if isAdmin(); }
+
+    // ----- الأسئلة الشائعة: المنشور بس للكل، والأدمن يعدّل -----
+    match /faqs/{id} {
+      allow read: if resource.data.published == true || isStaff();
+      allow write: if isAdmin();
+    }
+
+    // ----- الاستشارات الأونلاين -----
+    // رقم المستند = كود الاستشارة (المريض بيتابع بيه). قايمة الاستشارات للموظفين بس.
+    match /consults/{code} {
+      allow get: if true;
+      allow create: if code.matches('^[A-Z0-9]{8,12}$')
+        && request.resource.data.keys().hasOnly(['name','phone','branchId','topic','doctorId','doctorName','targets','question','status','createdAt'])
+        && request.resource.data.status == 'new'
+        && request.resource.data.name is string && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 100
+        && request.resource.data.phone is string && request.resource.data.phone.size() > 0 && request.resource.data.phone.size() <= 30
+        && request.resource.data.question is string && request.resource.data.question.size() > 0 && request.resource.data.question.size() <= 2000
+        && request.resource.data.topic is string && request.resource.data.topic.size() <= 200
+        && request.resource.data.doctorId is string && request.resource.data.doctorId.size() <= 40
+        && request.resource.data.targets is list && request.resource.data.targets.size() <= 30;
+      allow list, update, delete: if isOffice();
+      // الدكتور: الاستشارات اللي اتبعتتله، ويرد عليها بس
+      allow list: if isDoctor() && myStaffId() in resource.data.targets;
+      allow update: if isDoctor() && myStaffId() in resource.data.targets
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['replies','status','answeredAt']);
+    }
+
+    // ----- سلة المحذوفات: أي موظف بيمسح حاجة بتتنقل هنا، والأدمن بس يشوفها ويرجّعها -----
+    match /trash/{id} {
+      allow create: if isStaff()
+        && request.resource.data.keys().hasOnly(['col','docId','data','title','branchId','deletedAt','deletedBy'])
+        && request.resource.data.col is string && request.resource.data.docId is string
+        && request.resource.data.data is map && request.resource.data.deletedAt is string;
+      allow read, update, delete: if isAdmin();
+    }
+
+    match /public_doctors/{id} {
+      allow read: if true;
+      allow write: if isOffice();
+    }
+    match /branches/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    // ----- الموظفين وأكوادهم -----
+    match /staff_auth/{uid} {
+      allow read: if (request.auth != null && request.auth.uid == uid) || isAdmin();
+      allow create: if isAdmin() && (request.resource.data.role != 'superadmin' || isSuper());
+      allow update: if isSuper() || (isAdmin() && resource.data.role != 'superadmin' && request.resource.data.role != 'superadmin');
+      allow delete: if isSuper() || (isAdmin() && resource.data.role != 'superadmin');
+    }
+    match /staff_members/{id} {
+      // مفيهاش أكواد خلاص، فينفع كل الموظفين يقروها (أسماء الدكاترة والفروع)
+      allow read: if isStaff();
+      allow create: if isAdmin() && (request.resource.data.role != 'superadmin' || isSuper());
+      allow update: if isSuper() || (isAdmin() && resource.data.role != 'superadmin' && request.resource.data.role != 'superadmin');
+      allow delete: if isAdmin() && resource.data.role != 'superadmin';
+    }
+    // أكواد الدخول نفسها: السوبر أدمن بس
+    match /staff_codes/{id} {
+      allow read, write: if isSuper();
+    }
+
+    // ----- سجل المتابعات (اللي كنسل/أجّل + اللي بنضيفهم يدوي): المكتب بس -----
+    match /followups/{id} { allow read, write: if isOffice(); }
+
+    // ----- المرضى: المكتب كله، والطبيب يشوف حالاته بس -----
+    match /patients/{id} {
+      allow read, write: if isOffice();
+      allow read: if isDoctor() && resource.data.doctorId == myStaffId();
+    }
+
+    // ----- المعامل: كل الموظفين (الطبيب بيضيف ويعدل حالات) -----
+    match /lab_cases/{id}   { allow read, write: if isStaff(); }
+
+    // ----- الفلوس والمخزن: المكتب بس (الأطباء لأ) -----
+    // التوريد: السكرتارية تقدر تعدّل بس كل تعديل لازم يتسجل في سجل التعديلات (editLog) — والمسلَّم للإدارة مايتعدلش
+    match /payments/{id} {
+      allow read, create: if isOffice();
+      allow delete: if isAdmin() || (isOffice() && resource.data.get('delivered', false) == false);
+      allow update: if isAdmin() || (isOffice()
+        && resource.data.get('delivered', false) == false
+        && request.resource.data.get('editLog', []).size() == resource.data.get('editLog', []).size() + 1
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['delivered', 'zeroed', 'deliveredAt', 'recordedBy', 'recordedById', 'createdDay', 'createdAt']));
+    }
+    match /shortages/{id}   { allow read, write: if isOffice(); }
+    // المستهلكات: السكرتارية تشوف وتسجّل بس — التعديل والمسح للأدمن
+    match /consumables/{id} { allow read, create: if isOffice(); allow update, delete: if isAdmin(); }
+    // تاريخ طلب النواقص (آخر مرة كل صنف اتطلب)
+    match /shortage_hist/{id} { allow read, write: if isOffice(); }
+    // المخزن والجرد
+    match /inv_items/{id} {
+      allow read: if isOffice();
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || (isOffice() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stock','lastMoveAt']));
+    }
+    match /inv_counts/{id} { allow read: if isOffice(); allow write: if isAdmin(); }
+    match /inv_tools/{id} { allow read: if isOffice(); allow write: if isAdmin(); }
+    // المهام: الإدارة والدكاترة بيبعتوها، والسكرتارية/التمريض تشوف مهامها وتعلّم إنها خلصت بس
+    match /tasks/{id} {
+      allow read: if isAdmin() || (isStaffUser() && (resource.data.assignees.hasAny([myStaffId()]) || resource.data.createdById == myStaffId()));
+      allow create: if isAdmin() || (isDoctor() && request.resource.data.createdById == myStaffId());
+      allow delete: if isAdmin() || (isDoctor() && resource.data.createdById == myStaffId());
+      allow update: if isAdmin() || (isDoctor() && resource.data.createdById == myStaffId())
+        || (isStaffUser() && resource.data.assignees.hasAny([myStaffId()])
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'doneAt', 'doneBy', 'doneNote', 'seenAt', 'history', 'lastDoneAt', 'due', 'remindedFor']));
+    }
+    // سجل حالات الدكاترة: الدكتور يشوف ويسجل حالاته هو بس، والإدارة تشوف كله وتعلّق (السكرتارية لأ)
+    match /case_logs/{id} {
+      allow read, delete: if isAdmin() || (isDoctor() && resource.data.doctorId == myStaffId());
+      allow create: if isAdmin() || (isDoctor() && request.resource.data.doctorId == myStaffId());
+      allow update: if isAdmin() || (isDoctor() && resource.data.doctorId == myStaffId()
+        && request.resource.data.doctorId == myStaffId()
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['review']));
+    }
+    // صور وملفات الحالات (متقسمة أجزاء)
+    match /case_files/{id} {
+      allow read, delete: if isAdmin() || (isDoctor() && resource.data.doctorId == myStaffId());
+      allow create: if isAdmin() || (isDoctor() && request.resource.data.doctorId == myStaffId());
+    }
+    match /inv_invoices/{id} { allow read: if isOffice(); allow write: if isAdmin(); }
+    match /dues/{id}        { allow read, write: if isOffice(); }
+    match /lab_costs/{id}   { allow read, write: if isSuper(); }
+    // سجل الإشعارات اليومية (عشان ملخص الصبح يتبعت مرة واحدة بس)
+    match /tg_log/{id}      { allow read, create: if isOffice(); }
+
+    // ===== أي collection تانية: صاحبة الحساب بس (كانت مفتوحة للعالم كله قبل كده) =====
+    match /{col}/{doc=**} {
+      allow read, write: if isOwner() && !(col in [
+        'settings','private_config','specialties','services','consults','faqs','appointments','online_bookings','booked_slots','public_doctors','branches','phone_book',
+        'staff_auth','staff_members','staff_codes','patients','payments','shortages','lab_cases','consumables','dues','lab_costs','tg_log','trash','followups','shortage_hist','inv_items','inv_counts','inv_tools','inv_invoices','case_logs','case_files','tasks'
+      ]);
+    }
+  }
+}
