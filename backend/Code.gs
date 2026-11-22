@@ -74,7 +74,7 @@ function setup() {
   if (!cfg.token) throw new Error('مفيش توكن تيليجرام محفوظ — حطيه من السيستم: الإعدادات ← تيليجرام');
   const branches = list_('branches');
   if (cfg.main) post_(cfg, cfg.main, '✅ الإشعارات التلقائية والنسخ الاحتياطي اشتغلوا من سيرفرات جوجل.\nالفروع: ' + branches.map(b => b.name).join('، '));
-  const f = dailyBackup();
+  const f = backupNow();
   Logger.log('تمام ✓ — الإشعارات كل 5 دقايق، والنسخة الاحتياطية كل يوم الساعة ' + BACKUP_HOUR + '. أول نسخة: ' + f);
 }
 
@@ -496,7 +496,13 @@ function postId_(cfg, chat, text) {
 /* ================= النسخ الاحتياطي ================= */
 
 // نسخة كاملة من قاعدة البيانات في جوجل درايف (نفس شكل ملف "تنزيل نسخة" في السيستم، فبتترجع من هناك)
+// بقت كل أسبوع (يوم الجمعة) بدل كل يوم — لأنها بتقرا قاعدة البيانات كلها. لو عايزة نسخة حالاً شغّلي backupNow
+const BACKUP_DAY = 5; // 5 = الجمعة
 function dailyBackup() {
+  if (Number(Utilities.formatDate(new Date(), TZ, 'u')) !== BACKUP_DAY) return 'skip';
+  return backupNow();
+}
+function backupNow() {
   const out = { app: 'new-era-clinic', version: 1, at: new Date().toISOString(), by: 'google-script', collections: {} };
   // صور وملفات الحالات تقيلة — مش بتدخل في النسخة اليومية (عشان النسخة متقفش ودرايف ميتملاش)؛ بيانات الحالات نفسها بتدخل
   const SKIP = ['case_files'];
@@ -994,7 +1000,7 @@ function createOnce_(path) {
 
 /* ================= النشر التلقائي من GitHub ================= */
 // رقم نسخة الملف ده (بيزيد مع كل تعديل) — بيبان في doGet عشان نتأكد إن آخر نسخة اشتغلت
-const CODE_REV = 2;
+const CODE_REV = 3;
 const GH_RAW = 'https://raw.githubusercontent.com/neweradentalclinics-png/NewEra/main/backend/';
 const STORAGE_BUCKET = 'new-era-dental-center.firebasestorage.app';
 
