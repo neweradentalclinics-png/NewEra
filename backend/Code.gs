@@ -88,20 +88,24 @@ function every5min() {
   try { autoDeploy_(false); } catch (e) { Logger.log('deploy: ' + e); }
   const cfg = tgConfig_();
   if (!cfg.token) return;
-  const ctx = ctx_(cfg);
-  const since = new Date(Date.now() - 2 * 864e5).toISOString();
+  let ctx0 = null;
+  const C = () => ctx0 = ctx0 || ctx_(cfg); // الفروع والقوالب بتتقرا بس لو فيه حاجة هتتبعت (ومحفوظة نص ساعة)
 
   // بنبعت بس اللي اتعمل بعد ما السكريبت ده اشتغل أول مرة (عشان ميبعتش حاجات قديمة)
-  const props0 = PropertiesService.getScriptProperties();
-  if (!props0.getProperty('srvStart')) props0.setProperty('srvStart', new Date().toISOString());
-  const start = props0.getProperty('srvStart'), fresh = x => (x || '') >= start;
+  const props = PropertiesService.getScriptProperties();
+  if (!props.getProperty('srvStart')) props.setProperty('srvStart', new Date().toISOString());
+  const start = props.getProperty('srvStart'), fresh = x => (x || '') >= start;
 
-  // 0) المهام: مهمة جديدة ← للموظفة، ميعادها جه ← تذكير، خلصت ← للي بعتها
-  try { tasks_(ctx, fresh); } catch (e) { Logger.log('tasks: ' + e); }
+  // ===== توفير القراءات: بنسأل بس عن اللي اتغير من آخر مرة (من غير جديد = قراءة واحدة بس) =====
+  // 15 دقيقة زيادة احتياطي لو ساعة موبايل حد متأخرة — والعلامة tgSent بتمنع التكرار
+  const runAt = new Date().toISOString();
+  const last = props.getProperty('wm') || new Date(Date.now() - 30 * 6e4).toISOString();
+  const since = new Date(Date.parse(last) - 15 * 6e4).toISOString();
 
   // 1) حجز جديد: أونلاين، أو من السكرتارية (كل شخص حسب مواعيده: مع كل حجز / بعد جدول يومه)
   query_('appointments', [['createdAt', '>=', since]]).forEach(a => {
     if (a.tgSent) return;
+    const ctx = C();
     if (a.source !== 'online') {
       if (!fresh(a.createdAt) || !claim_(a, { tgSent: true })) return;
       const same = query_('appointments', [['date', '==', a.date]]).filter(x => x.status !== 'canceled');
@@ -120,6 +124,7 @@ function every5min() {
   Object.keys(changed).map(k => changed[k]).forEach(a => {
     if (!(a.status === 'canceled' || a.status === 'postponed') || a.tgCancelSent) return;
     if (!claim_(a, { tgCancelSent: true })) return;
+    const ctx = C();
     const kind = a.status === 'canceled' ? (a.canceledBy === 'patient' ? 'المريض لغى الحجز أونلاين' : 'كنسل') : (a.postponedTo ? 'أجّل لميعاد جديد (' + a.postponedTo + ')' : 'أجّل من غير ميعاد');
     send_(ctx, fill_(ctx.T.tgCancel, { kind, patient: a.patientName, phone: a.phone || '', date: a.date, time: a.time || '', service: a.service || '', doctor: a.doctorName || '', branch: ctx.bOf(a.branchId).name }), a.branchId, 'cancel', [a.doctorId]);
   });
@@ -128,39 +133,42 @@ function every5min() {
   query_('appointments', [['rescheduledAt', '>=', since]]).forEach(a => {
     if (a.tgReschedAt === a.rescheduledAt) return;
     if (!claim_(a, { tgReschedAt: a.rescheduledAt })) return;
-    const dn = n => n ? 'د. ' + n : 'بدون دكتور';
+    const ctx = C(), dn = n => n ? 'د. ' + n : 'بدون دكتور';
     send_(ctx, fill_(ctx.T.tgResched, { patient: a.patientName, phone: a.phone || '', oldDate: a.prevDate || '', oldTime: a.prevTime || '', oldDoctor: dn(a.prevDoctorName), date: a.date, time: a.time || '', doctor: dn(a.doctorName), branch: ctx.bOf(a.branchId).name, by: a.rescheduledBy === 'patient' ? 'المريض أونلاين' : (a.rescheduledBy || '') }),
       a.branchId, 'reschedule', [a.doctorId, a.prevDoctorId !== a.doctorId ? a.prevDoctorId : null]);
   });
 
   // 3ب) الاستشارات: الجديدة تتبعت، والردود من تيليجرام تتسجل
-  consults_(ctx, since);
+  consults_(cfg, C, since);
 
-  // 3ج) نقص جديد (للي مختار "النواقص فوراً") وفاتورة جديدة
-  query_('shortages', [['timestamp', '>=', since]]).forEach(x => {
-    if (x.tgSent || !fresh(x.timestamp) || !claim_(x, { tgSent: true })) return;
-    const all = list_('shortages'), bn = x.branchId === 'store' ? 'المخزن' : ctx.bOf(x.branchId).name;
-    send_(ctx, fill_(ctx.T.tgShortage, { item: x.itemName, qty: x.quantity || '', branch: bn, by: x.requestedBy || '', count: all.filter(y => y.branchId === x.branchId).length, countAll: all.length }), x.branchId, 'shortage', []);
-  });
-  query_('dues', [['createdAt', '>=', since]]).forEach(x => {
+  props.setProperty('wm', runAt);
+
+  // 4) مرة واحدة الصبح: المعامل + المتابعات + المهام + الفواتير الجديدة + تنضيف سلة المحذوفات
+  try { daily_(C, fresh); } catch (e) { Logger.log('daily: ' + e); }
+
+  // 4ب) الرسايل المخصصة (إعداداتها محفوظة نص ساعة، والبيانات بتتقرا بس وقت ما رسالة تتبعت)
+  customMsgs_(C);
+
+  // 5) الرسايل المجمّعة: جدول المواعيد والملخص الصبح، والنواقص مرة في اليوم في ميعادها
+  digests_(C);
+}
+
+// مرة واحدة في اليوم، بعد ميعاد جدول الصبح
+function daily_(C, fresh) {
+  const props = PropertiesService.getScriptProperties(), today = day_(0);
+  if (props.getProperty('lastDaily') === today) return;
+  const T = templates_();
+  if (nowHour_() < T._times.sched) return;
+  const prev = props.getProperty('lastDailyAt') || new Date(Date.now() - 864e5).toISOString();
+  props.setProperty('lastDaily', today); props.setProperty('lastDailyAt', new Date().toISOString());
+  const ctx = C();
+  hourly_(ctx);
+  try { tasks_(ctx, fresh); } catch (e) { Logger.log('tasks: ' + e); }
+  query_('dues', [['createdAt', '>=', prev]]).forEach(x => {
     if (x.tgSent || !fresh(x.createdAt) || !claim_(x, { tgSent: true })) return;
     const unpaid = query_('dues', [['paid', '==', false]]), br = unpaid.filter(y => y.branchId === x.branchId), sum = a => Math.round(a.reduce((t, y) => t + (Number(y.amount) || 0), 0) * 100) / 100;
     send_(ctx, fill_(ctx.T.tgDue, { party: x.party, amount: x.amount, due: x.dueDate || 'بدون موعد', branch: x.branchId === 'store' ? 'المخزن' : ctx.bOf(x.branchId).name, by: x.recordedBy || '', sum: sum(br), count: br.length, sumAll: sum(unpaid), countAll: unpaid.length }), x.branchId, 'due', []);
   });
-
-  // 4) كل ساعة: المعامل + المتابعات
-  const props = PropertiesService.getScriptProperties();
-  const hourKey = Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd-HH');
-  if (props.getProperty('lastHourly') !== hourKey) {
-    props.setProperty('lastHourly', hourKey);
-    hourly_(ctx);
-  }
-
-  // 4ب) الرسايل المخصصة
-  customMsgs_(ctx);
-
-  // 5) الرسايل المجمّعة: كل شخص في الساعة اللي اتحددتله (جدول المواعيد + ملخص الصبح + النواقص)
-  digests_(ctx);
 }
 
 function hourly_(ctx) {
@@ -188,32 +196,43 @@ const DIGEST_WINDOW_H = 4; // لو الميعاد فات بأكتر من 4 سا�
 function inWin_(h, at) { return h >= at && h < at + DIGEST_WINDOW_H; }
 function nowHour_() { return Number(Utilities.formatDate(new Date(), TZ, 'H')); }
 
-function digests_(ctx) {
-  const h = nowHour_(), today = day_(0), c = ctx.cfg, T = ctx.T, def = T._times;
+function digests_(C) {
+  const cfg0 = tgConfig_(), T0 = templates_();
+  const h = nowHour_(), today = day_(0), def = T0._times;
   // بسرعة: لو محدش ميعاده دلوقتي، منقراش أي بيانات
-  const raws = [c.mainCfg || {}, {}].concat(Object.keys(c.branchCfg || {}).map(k => c.branchCfg[k] || {}), Object.keys(c.people).map(k => c.people[k] || {}));
+  const raws = [cfg0.mainCfg || {}, {}].concat(Object.keys(cfg0.branchCfg || {}).map(k => cfg0.branchCfg[k] || {}), Object.keys(cfg0.people).map(k => cfg0.people[k] || {}));
   if (!raws.some(o => { const t = timing_(o, def); return inWin_(h, t.schedHour) || inWin_(h, t.shortHour); })) return;
   const props = PropertiesService.getScriptProperties();
-  let D = null;
-  const data = () => D = D || {
-    apps: query_('appointments', [['date', '>=', today], ['date', '<=', day_(1)]]),
-    pats: query_('followups', [['followUpDate', '>=', day_(-60)], ['followUpDate', '<=', today]]),
-    labs: query_('lab_cases', [['sentDate', '>=', day_(-90)]]),
-    shorts: list_('shortages'),
-    inv: list_('inv_items'),
-    tools: list_('inv_tools')
+  // لو كل اللي ميعادهم دلوقتي استلموا خلاص النهاردة، منقراش حاجة
+  const ctx = C(), c = ctx.cfg, T = ctx.T;
+  const pend = recipients_(ctx).filter(r => (inWin_(h, r.schedHour) && (props.getProperty('dg_sched_' + r.key) !== today || props.getProperty('dg_digest_' + r.key) !== today)) || (inWin_(h, r.shortHour) && props.getProperty('dg_shorts_' + r.key) !== today));
+  if (!pend.length) return;
+  // كل جزء بيتقرا بس لو هيتبعت
+  const D = {};
+  const shortCounts = () => JSON.parse(props.getProperty('shortCounts') || '{}'); // عدد النواقص من آخر رسالة نواقص (عشان الملخص ميقراش النواقص تاني)
+  const data = {
+    get apps() { return D.apps = D.apps || query_('appointments', [['date', '>=', today], ['date', '<=', day_(1)]]); },
+    get pats() { return D.pats = D.pats || query_('followups', [['followUpDate', '>=', day_(-60)], ['followUpDate', '<=', today]]); },
+    get labs() { return D.labs = D.labs || query_('lab_cases', [['sentDate', '>=', day_(-90)]]); },
+    get shorts() {
+      if (!D.shorts) { D.shorts = list_('shortages'); const cnt = {}; D.shorts.forEach(x => { cnt[x.branchId] = (cnt[x.branchId] || 0) + 1; }); props.setProperty('shortCounts', JSON.stringify(cnt)); }
+      return D.shorts;
+    },
+    get inv() { return D.inv = D.inv || list_('inv_items'); },
+    get tools() { return D.tools = D.tools || list_('inv_tools'); },
+    shortCount: id => D.shorts ? D.shorts.filter(x => x.branchId === id).length : (shortCounts()[id] || 0)
   };
   const once = (what, r) => { const pk = 'dg_' + what + '_' + r.key; if (props.getProperty(pk) === today) return false; props.setProperty(pk, today); return createOnce_('tg_log/' + what + '_' + r.key + '_' + today); };
-  recipients_(ctx).forEach(r => {
+  pend.forEach(r => {
     const scope = scope_(ctx, r), msgs = [];
     if (inWin_(h, r.schedHour)) {
-      if (r.kinds.indexOf('schedule') >= 0 && r.schedMode !== 'instant' && on_(c, 'schedule') && once('sched', r)) schedFor_(ctx, r, scope, data(), today).forEach(m => msgs.push(m));
-      if (r.kinds.indexOf('digest') >= 0 && on_(c, 'digest') && once('digest', r)) scope.forEach(b => msgs.push(digestText_(ctx, b, data(), today)));
+      if (r.kinds.indexOf('schedule') >= 0 && r.schedMode !== 'instant' && on_(c, 'schedule') && once('sched', r)) schedFor_(ctx, r, scope, data, today).forEach(m => msgs.push(m));
+      if (r.kinds.indexOf('digest') >= 0 && on_(c, 'digest') && once('digest', r)) scope.forEach(b => msgs.push(digestText_(ctx, b, data, today)));
     }
-    if (inWin_(h, r.shortHour) && r.kinds.indexOf('shortage') >= 0 && r.shortMode !== 'instant' && on_(c, 'shortage') && T._deleted.indexOf('tgShortDaily') < 0 && once('shorts', r)) {
+    if (inWin_(h, r.shortHour) && r.kinds.indexOf('shortage') >= 0 && on_(c, 'shortage') && T._deleted.indexOf('tgShortDaily') < 0 && once('shorts', r)) {
       const sc = (r.type === 'main' || r.type === 'admin') ? scope.concat([{ _id: 'store', name: 'المخزن' }]) : scope;
-      sc.forEach(b => { const list = data().shorts.filter(x => x.branchId === b._id); if (list.length) msgs.push(shortText_(ctx, b, list, today)); });
-      if (r.type === 'main' || r.type === 'admin') { const m = lowStockText_(data(), today); if (m) msgs.push(m); }
+      sc.forEach(b => { const list = data.shorts.filter(x => x.branchId === b._id); if (list.length) msgs.push(shortText_(ctx, b, list, today)); });
+      if (r.type === 'main' || r.type === 'admin') { const m = lowStockText_(data, today); if (m) msgs.push(m); }
     }
     msgs.forEach(m => post_(c, String(r.chat), m));
   });
@@ -248,7 +267,7 @@ function digestText_(ctx, b, d, today) {
     tomorrow: d.apps.filter(a => mine(a) && a.date === tmr && (!a.status || a.status === 'unconfirmed' || a.status === 'booked' || a.status === 'no_answer')).length,
     follow: d.pats.filter(p => mine(p) && !p.followedAt).length,
     lab: d.labs.filter(x => mine(x) && labDue_(x, today)).length,
-    short: d.shorts.filter(mine).length
+    short: d.shortCount ? d.shortCount(b._id) : d.shorts.filter(mine).length
   });
 }
 
@@ -295,7 +314,7 @@ function taskDue_(due) {
   return dl + ' الساعة ' + ((h % 12) || 12) + ':' + m + (h < 12 ? ' ص' : ' م');
 }
 function tasks_(ctx, fresh) {
-  const nowL = Utilities.formatDate(new Date(), TZ, "yyyy-MM-dd'T'HH:mm");
+  const nowL = day_(0) + 'T23:59'; // بتشتغل مرة الصبح: بتفكّر بكل اللي ميعاده النهاردة
   query_('tasks', [['status', '==', 'open']]).forEach(t => {
     const to = (t.assignees || [])[0];
     // مهمة جديدة
@@ -334,8 +353,8 @@ function tasks_(ctx, fresh) {
 const CM_COUNT_VARS = ['حجوزات_النهاردة', 'حجوزات_بكرة', 'غير_مؤكد_بكرة', 'أونلاين_النهاردة', 'كنسل_النهاردة', 'متابعات_مستحقة', 'معامل_متأخرة', 'نواقص'];
 const CM_WINDOW_MIN = 180;
 
-function customMsgs_(ctx) {
-  const doc = get_('private_config/custom_msgs');
+function customMsgs_(C) {
+  const doc = cached_('cfg_cm', 1800, () => get_('private_config/custom_msgs'));
   const list = (doc && doc.list) || [];
   const now = new Date(), today = day_(0);
   const dow = Number(Utilities.formatDate(now, TZ, 'u')) % 7;
@@ -348,6 +367,7 @@ function customMsgs_(ctx) {
     return mins >= at && mins < at + CM_WINDOW_MIN;
   });
   if (!due.length) return;
+  const ctx = C();
   let data = null;
   due.forEach(m => {
     if (!createOnce_('tg_log/custom_' + m.id + '_' + today)) return;
@@ -412,11 +432,13 @@ function consultChats_(ctx, c) {
   return chats.filter((x, i) => chats.indexOf(x) === i);
 }
 
-function consults_(ctx, since) {
+function consults_(cfg, C, since) {
+  let ctx = null; const X = () => ctx = ctx || C();
   // 1) استشارات جديدة لسه متبعتتش (لو السيستم مكانش مفتوح)
   query_('consults', [['createdAt', '>=', since]]).forEach(c => {
     if (c.tgSent || c.status !== 'new') return;
     if (!claim_(c, { tgSent: true })) return;
+    const ctx = X();
     const text = fill_(ctx.T.tgConsult, { code: c._id, patient: c.name, phone: c.phone || '', branch: ctx.bOf(c.branchId).name || '—', topic: c.topic || '—', doctor: c.doctorName ? 'د. ' + c.doctorName : ((c.targets || []).length ? 'أي دكتور مناسب' : 'الإدارة'), question: c.question });
     const msgs = [];
     consultChats_(ctx, c).forEach(chat => { const r = postId_(ctx.cfg, chat, text); if (r) msgs.push(r); });
@@ -431,13 +453,14 @@ function consults_(ctx, since) {
     const last = (c.replies || []).slice(-1)[0];
     if (!last || last.via !== 'system' || c.tgReplyAt === c.answeredAt) return;
     if (!claim_(c, { tgReplyAt: c.answeredAt })) return;
+    const ctx = X();
     send_(ctx, fill_(ctx.T.tgConsultReply, { code: c._id, patient: c.name, by: last.by || '', reply: last.text || '' }), c.branchId, 'consult', []);
   });
 
   // 2) الردود: أي Reply على رسالة استشارة في تيليجرام بيتسجل كرد
   const props = PropertiesService.getScriptProperties();
   const offset = Number(props.getProperty('tgOffset') || 0);
-  const r = UrlFetchApp.fetch('https://api.telegram.org/bot' + ctx.cfg.token + '/getUpdates?timeout=0&allowed_updates=%5B%22message%22%5D' + (offset ? '&offset=' + offset : ''), { muteHttpExceptions: true });
+  const r = UrlFetchApp.fetch('https://api.telegram.org/bot' + cfg.token + '/getUpdates?timeout=0&allowed_updates=%5B%22message%22%5D' + (offset ? '&offset=' + offset : ''), { muteHttpExceptions: true });
   const j = JSON.parse(r.getContentText() || '{}');
   if (!j.ok) { Logger.log('getUpdates: ' + (j.description || r.getResponseCode()) + (r.getResponseCode() === 409 ? ' — البوت متوصّل بـ Webhook: افصليه من السيستم (الإعدادات ← تيليجرام ← هات الشاتات ← فصل الـ Webhook)' : '')); return; }
   let last = offset;
@@ -448,7 +471,7 @@ function consults_(ctx, since) {
     const key = String(m.chat.id) + '_' + m.reply_to_message.message_id;
     const found = query_('consults', [['tgKeys', 'array-contains', key]]);
     if (!found.length) return;
-    const c = found[0];
+    const c = found[0], ctx = X();
     const fromChat = String(m.chat.id), fromUser = String((m.from && m.from.id) || '');
     let by = '', byId = '';
     Object.keys(ctx.cfg.people).forEach(k => { const per = ctx.cfg.people[k]; if (per && (String(per.chat) === fromUser || String(per.chat) === fromChat) && !by) { const st = ctx.staff().find(x => x._id === k); byId = k; by = per.manual ? (per.name || '') : st ? ((st.role === 'doctor' ? 'د. ' : '') + st.name) : ''; } });
@@ -511,7 +534,7 @@ function rawObj_(f) { const o = {}; Object.keys(f || {}).forEach(k => { o[k] = r
 /* ================= تيليجرام ================= */
 
 function tgConfig_() {
-  const c = get_('private_config/telegram') || {};
+  const c = cached_('cfg_tg', 1800, () => get_('private_config/telegram')) || {};
   let routes = DEFAULT_ROUTES;
   if (c.routes) {
     const known = c.routesKnown || OLD_KINDS;
@@ -528,7 +551,7 @@ function tgConfig_() {
 
 const TPL_KIND = { tgApp: 'booking', tgOnline: 'online', tgUnsched: 'unsched', tgCancel: 'cancel', tgResched: 'reschedule', tgFollow: 'follow', tgLab: 'lab', tgShortage: 'shortage', tgDue: 'due', tgDigest: 'digest', tgConsult: 'consult' };
 function ctx_(cfg) {
-  const branches = list_('branches');
+  const branches = cached_('cfg_br', 1800, () => list_('branches'));
   let staff = null;
   const T = templates_();
   // الأنواع اللي قالبها اتحذف بتتعامل كأنها موقّفة
@@ -539,12 +562,12 @@ function ctx_(cfg) {
   return {
     cfg, branches, T,
     bOf: id => branches.find(b => b._id === id) || { _id: id, name: '' },
-    staff: () => (staff = staff || list_('staff_members'))
+    staff: () => (staff = staff || cached_('cfg_staff', 1800, () => list_('staff_members')))
   };
 }
 
 function templates_() {
-  const t = get_('settings/templates') || {};
+  const t = cached_('cfg_tpl', 1800, () => get_('settings/templates')) || {};
   const out = {};
   const OLD = { tgCancel: '❌ {kind} — فرع {branch}\nالمريض: {patient}\nالموبايل: {phone}\nالموعد كان: {date} {time}\nالخدمة: {service}\nالدكتور: {doctor}\n📞 اتسجل في سجل المرضى للمتابعة' };
   Object.keys(TPL_DEFAULT).forEach(k => { out[k] = (t[k] && t[k] !== OLD[k]) ? t[k] : TPL_DEFAULT[k]; });
@@ -890,6 +913,17 @@ function daysLabel_(n) { return ({ 1: 'يوم', 2: 'يومين', 3: '3 أيام'
 
 /* ================= Firestore ================= */
 
+// إعدادات بتتغير نادراً (التوكن، الفروع، القوالب، الموظفين): بتتحفظ نص ساعة بدل ما تتقرا كل 5 دقايق
+function cached_(key, sec, fn) {
+  const c = CacheService.getScriptCache(), v = c.get(key);
+  if (v !== null) { try { return JSON.parse(v); } catch (e) { } }
+  const r = fn();
+  try { c.put(key, JSON.stringify(r === undefined ? null : r), sec); } catch (e) { }
+  return r;
+}
+// لو اتغيرت إعدادات تيليجرام أو القوالب وعايزاها تشتغل فوراً: شغّلي دي
+function clearCache() { CacheService.getScriptCache().removeAll(['cfg_tg', 'cfg_br', 'cfg_staff', 'cfg_tpl', 'cfg_cm']); Logger.log('اتمسح ✓'); }
+
 function api_(method, url, body) {
   const opt = { method: method, muteHttpExceptions: true, headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken(), 'x-goog-user-project': PROJECT_ID } };
   if (body) { opt.contentType = 'application/json'; opt.payload = JSON.stringify(body); }
@@ -960,7 +994,7 @@ function createOnce_(path) {
 
 /* ================= النشر التلقائي من GitHub ================= */
 // رقم نسخة الملف ده (بيزيد مع كل تعديل) — بيبان في doGet عشان نتأكد إن آخر نسخة اشتغلت
-const CODE_REV = 1;
+const CODE_REV = 2;
 const GH_RAW = 'https://raw.githubusercontent.com/neweradentalclinics-png/NewEra/main/backend/';
 const STORAGE_BUCKET = 'new-era-dental-center.firebasestorage.app';
 
