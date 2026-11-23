@@ -1038,7 +1038,7 @@ function createOnce_(path) {
 
 /* ================= النشر التلقائي من GitHub ================= */
 // رقم نسخة الملف ده (بيزيد مع كل تعديل) — بيبان في doGet عشان نتأكد إن آخر نسخة اشتغلت
-const CODE_REV = 4;
+const CODE_REV = 5;
 const GH_RAW = 'https://raw.githubusercontent.com/neweradentalclinics-png/NewEra/main/backend/';
 const STORAGE_BUCKET = 'new-era-dental-center.firebasestorage.app';
 
@@ -1051,6 +1051,9 @@ function autoDeploy_(force) {
   const done = JSON.parse(props.getProperty('deploy_done') || '{}');
   const todo = ['firestore', 'storage', 'script', 'indexes'].filter(k => want[k] && (force || Number(want[k]) > Number(done[k] || 0)));
   if (!todo.length) return { ok: true, nothing: true };
+  // لو آخر محاولة فشلت بنفس السبب، منحاولش تاني قبل 6 ساعات (عشان تليجرام ميفضلش يبعت نفس الرسالة كل 5 دقايق)
+  const fail = JSON.parse(props.getProperty('deploy_fail') || '{}');
+  if (!force && fail.at && Date.now() - fail.at < 6 * 3600 * 1000 && fail.want === JSON.stringify(want)) return { ok: false, waiting: true };
   const lock = LockService.getScriptLock(); if (!lock.tryLock(1000)) return { ok: false, busy: true };
   const out = { at: new Date().toISOString(), ok: true, steps: [] };
   try {
@@ -1066,7 +1069,11 @@ function autoDeploy_(force) {
     });
   } finally { lock.releaseLock(); }
   props.setProperty('deploy_last', JSON.stringify(out));
-  deployNotify_(out);
+  const sig = out.ok ? '' : out.steps.join('|');
+  if (out.ok) props.deleteProperty('deploy_fail');
+  else props.setProperty('deploy_fail', JSON.stringify({ at: Date.now(), want: JSON.stringify(want), sig }));
+  // نفس الخطأ اتبعت قبل كده؟ متبعتوش تاني (إلا لو شغّلتي deployNow بإيدك)
+  if (out.ok || force || fail.sig !== sig) deployNotify_(out);
   return out;
 }
 
@@ -1075,6 +1082,7 @@ function deployNotify_(out) {
     const cfg = tgConfig_(); if (!cfg.token || !cfg.main) return;
     let t = (out.ok ? '🚀 اتنشر تحديث جديد من GitHub' : '⚠️ في مشكلة في النشر من GitHub') + '\n' + out.steps.join('\n');
     if (out.scopesNeeded) t += '\n\n🔑 التحديث محتاج صلاحيات جديدة: افتحي السكريبت واختاري deployNow ودوسي Run ووافقي.';
+    if (/insufficient authentication scopes|PERMISSION_DENIED.*scope/i.test(out.steps.join(' '))) t += '\n\n🔑 السكريبت لسه مخدش صلاحية النشر: حطي appsscript.json الجديد في السكريبت، وبعدين اختاري deployNow ودوسي Run ووافقي على الصلاحيات. (الرسالة دي مش هتتكرر غير كل 6 ساعات)';
     post_(cfg, cfg.main, t);
   } catch (e) { Logger.log('deploy notify: ' + e); }
 }
