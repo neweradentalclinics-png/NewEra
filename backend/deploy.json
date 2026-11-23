@@ -1,5 +1,6 @@
 {
-  "firestore": 1,
-  "storage": 1,
-  "script": 3
+  "firestore": 2,
+  "storage": 2,
+  "script": 4,
+  "indexes": 1
 }

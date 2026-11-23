@@ -6,10 +6,11 @@
 |---|---|
 | `Code.gs` + `appsscript.json` | Google Apps Script (الإشعارات، النسخ الاحتياطي، الذكاء الاصطناعي) |
 | `firestore.rules` | قواعد Firestore |
+| `firestore.indexes.json` | فهارس Firestore (قفل الفروع والحسابات) |
 | `storage.rules` | قواعد Firebase Storage |
 
 **إزاي:** السكريبت كل 5 دقايق بيقرا `deploy.json`. لو أي رقم فيه زاد عن آخر مرة اتنشرت، بينشر الحاجة دي.
-عشان تنشري تعديل: عدّلي الملف، وزوّدي رقمه في `deploy.json` (firestore / storage / script).
+عشان تنشري تعديل: عدّلي الملف، وزوّدي رقمه في `deploy.json` (firestore / storage / script / indexes).
 
 **أول مرة بس:**
 1. فعّلي Google Apps Script API: https://script.google.com/home/usersettings

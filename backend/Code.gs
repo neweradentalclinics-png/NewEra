@@ -61,7 +61,7 @@ const TPL_DEFAULT = {
   tgConsultReply: '✅ اترد على الاستشارة #{code}\nالمريض: {patient}\nرد {by}:\n{reply}',
   tgDigest: '☀️ صباح الخير — ملخص فرع {branch}\n{date}\n\n📅 حجوزات النهاردة: {today} (أونلاين: {online})\n❓ حجوزات بكرة لسه مش مؤكدة: {tomorrow}\n📞 متابعات مستحقة: {follow}\n⏰ حالات معمل محتاجة تتطلب: {lab}\n⚠️ نواقص مفتوحة: {short}'
 };
-const APP_ST_TXT = { unconfirmed: '❓ مش مؤكد', booked: '❓ مش مؤكد', no_answer: '📵 لم يرد', confirmed: '✅ مؤكد', on_way: '🚗 في الطريق', arrived: '🟢 حضر', done: '✔️ خلص', postponed: '⏸ مؤجل' };
+const APP_ST_TXT = { no_show: '🚫 محضرش', unconfirmed: '❓ مش مؤكد', booked: '❓ مش مؤكد', no_answer: '📵 لم يرد', confirmed: '✅ مؤكد', on_way: '🚗 في الطريق', arrived: '🟢 حضر', done: '✔️ خلص', postponed: '⏸ مؤجل' };
 
 /* ================= التشغيل ================= */
 
@@ -711,6 +711,7 @@ function doPost(e) {
     if (req.action === 'caseUpload') return json_(caseUpload_(req));
     if (req.action === 'caseFile') return json_(caseFile_(req));
     if (req.action === 'caseDelete') return json_(caseDelete_(req));
+    if (req.action === 'ai') return json_(aiTool_(req));
     if (req.action === 'ping') { authAdmin_(req.idToken); const c = aiCfg_(); return json_({ ok: true, ai: !!c.key, provider: c.provider, model: c.model }); }
     return json_({ ok: false, error: 'طلب مش معروف' });
   } catch (err) { return json_({ ok: false, error: String(err && err.message || err) }); }
@@ -872,6 +873,43 @@ function marketing_(req) {
   return { ok: true, data: data, provider: c.provider, model: c.model, left: AI_DAILY_LIMIT - n - 1 };
 }
 
+/* ================= أدوات الذكاء الاصطناعي للسيستم (v4.6) =================
+ * copilot: مساعد الحالة للدكتور • xray: قراءة مبدئية للأشعة • explain: رسالة تشرح خطة العلاج للمريض
+ * recovery: رسالة واتساب مخصوصة لمريض فلوسه/علاجه مكملش • content: بوستات سوشيال • assistant: المساعد العائم
+ * كله بنفس المفتاح (private_config/ai) وبنفس الحد اليومي. الرد مساعدة بس — القرار للدكتور.
+ */
+const AI_TOOL_RULES = 'You are an assistant inside an Egyptian dental clinic management system (New Era Dental Center). Reply in Egyptian Arabic unless asked otherwise. Be concise, practical and safe. Never invent patient data. For clinical output: it is decision support for a licensed dentist, never a final diagnosis; flag uncertainty and urgent red flags clearly.';
+const AI_TOOLS = {
+  copilot: { who: ['doctor', 'admin', 'superadmin'], tok: 3000, prompt: r => 'CASE (from the medical record):\n' + String(r.caseText || '').slice(0, 9000) + '\n\nDOCTOR QUESTION: ' + String(r.question || 'حلّل الحالة واقترح خطة').slice(0, 1500) +
+    '\n\nReturn ONLY JSON: {"summary":"2-3 lines","redFlags":["..."],"differentials":["..."],"suggestedPlan":["step"],"beforeTreatment":["checks / medical precautions given the history"],"askPatient":["questions"],"note":"one line reminder that the dentist decides"}' },
+  xray: { who: ['doctor', 'admin', 'superadmin'], tok: 2500, img: true, prompt: r => 'Dental radiograph(s) attached (' + String(r.kind || 'periapical/panoramic') + '). Context: ' + String(r.context || '').slice(0, 2000) +
+    '\nDescribe visible findings tooth by tooth using FDI numbering where possible (caries, periapical lesions, bone loss, restorations, root canal fillings, impacted teeth, missing teeth). Be explicit about image quality limits and confidence.\nReturn ONLY JSON: {"quality":"...","findings":[{"tooth":"36","finding":"...","confidence":"low|medium|high"}],"summary":"...","recommend":["..."],"note":"preliminary AI reading — must be confirmed by the dentist"}' },
+  explain: { who: ['doctor', 'admin', 'superadmin', 'employee'], tok: 1500, prompt: r => 'Write a warm, clear WhatsApp message (Egyptian Arabic, no medical jargon) to the patient explaining their treatment plan, why each step matters, total cost and that installments are possible if mentioned. Patient first name: ' + String(r.name || '').slice(0, 40) + '\nPLAN:\n' + String(r.planText || '').slice(0, 4000) +
+    '\nReturn ONLY JSON: {"text":"the message"}' },
+  recovery: { who: ['admin', 'superadmin', 'employee'], tok: 1200, prompt: r => 'Write a short, polite, non-pushy WhatsApp follow-up (Egyptian Arabic) to bring this patient back to finish treatment / settle their account / rebook. Situation: ' + String(r.situation || '').slice(0, 1500) + '\nPatient first name: ' + String(r.name || '').slice(0, 40) +
+    '\nReturn ONLY JSON: {"text":"the message"}' },
+  content: { who: ['admin', 'superadmin'], tok: 3000, prompt: r => 'Write ' + Math.min(5, Number(r.count) || 3) + ' social media posts (Facebook/Instagram, Egyptian Arabic) for a dental clinic about: ' + String(r.topic || '').slice(0, 800) + '. Tone: ' + String(r.tone || 'friendly, trustworthy').slice(0, 100) + '. No false claims or guaranteed results, no before/after promises.\nReturn ONLY JSON: {"posts":[{"caption":"...","hashtags":["..."],"imageIdea":"..."}]}' },
+  assistant: { who: ['doctor', 'admin', 'superadmin', 'employee'], tok: 1500, prompt: r => 'User role: ' + String(r.role || '') + '. Current screen: ' + String(r.screen || '') + '.\nLIVE CONTEXT (today, only what this user may see):\n' + String(r.context || '').slice(0, 5000) +
+    '\nCONVERSATION:\n' + (r.history || []).slice(-8).map(m => (m.me ? 'USER: ' : 'ASSISTANT: ') + String(m.t || '').slice(0, 1200)).join('\n') + '\nUSER: ' + String(r.question || '').slice(0, 1500) +
+    '\nHelp them use the system (sections: المواعيد، الحجز الذكي، المرضى والسجل الطبي، المتابعات، المعامل، الحسابات: حسابات المرضى/الخزنة/المصروفات/مستحقات الدكاترة، المخزن، المهام، الإعدادات) or answer from the context. If you do not know, say so.\nReturn ONLY JSON: {"text":"answer"}' }
+};
+function aiTool_(req) {
+  const u = authUser_(req.idToken), t = AI_TOOLS[req.kind];
+  if (!t) throw new Error('أداة مش معروفة');
+  if (t.who.indexOf(u.role) < 0) throw new Error('الأداة دي مش متاحة لحسابك');
+  const c = aiCfg_();
+  if (!c.key) throw new Error('مفيش مفتاح ذكاء اصطناعي — الإدارة تحطه من: المخزن والجرد ← 📷 فاتورة ← ⚙️ الإعداد');
+  const props = PropertiesService.getScriptProperties(), pk = 'ai_n_' + day_(0), n = Number(props.getProperty(pk) || 0);
+  if (n >= AI_DAILY_LIMIT * 3) throw new Error('وصلتوا للحد اليومي للذكاء الاصطناعي — جربوا بكرة');
+  props.setProperty(pk, String(n + 1));
+  const imgs = t.img ? (req.images || []).slice(0, 3) : [];
+  const prompt = AI_TOOL_RULES + '\n\n' + t.prompt(req);
+  const text = c.provider === 'claude' ? askClaude_(c, prompt, imgs, t.tok) : askGemini_(c, prompt, imgs);
+  const data = parseJsonLoose_(text);
+  if (!data) throw new Error('الرد ماكانش مظبوط — جربوا تاني');
+  return { ok: true, data: data, provider: c.provider };
+}
+
 function askGemini_(c, prompt, imgs) {
   const parts = [{ text: prompt }].concat(imgs.map(i => ({ inline_data: { mime_type: i.mime || 'image/jpeg', data: i.data } })));
   const r = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(c.model) + ':generateContent', {
@@ -1000,7 +1038,7 @@ function createOnce_(path) {
 
 /* ================= النشر التلقائي من GitHub ================= */
 // رقم نسخة الملف ده (بيزيد مع كل تعديل) — بيبان في doGet عشان نتأكد إن آخر نسخة اشتغلت
-const CODE_REV = 3;
+const CODE_REV = 4;
 const GH_RAW = 'https://raw.githubusercontent.com/neweradentalclinics-png/NewEra/main/backend/';
 const STORAGE_BUCKET = 'new-era-dental-center.firebasestorage.app';
 
@@ -1011,7 +1049,7 @@ function autoDeploy_(force) {
   const props = PropertiesService.getScriptProperties();
   const want = JSON.parse(ghText_('deploy.json'));
   const done = JSON.parse(props.getProperty('deploy_done') || '{}');
-  const todo = ['firestore', 'storage', 'script'].filter(k => want[k] && (force || Number(want[k]) > Number(done[k] || 0)));
+  const todo = ['firestore', 'storage', 'script', 'indexes'].filter(k => want[k] && (force || Number(want[k]) > Number(done[k] || 0)));
   if (!todo.length) return { ok: true, nothing: true };
   const lock = LockService.getScriptLock(); if (!lock.tryLock(1000)) return { ok: false, busy: true };
   const out = { at: new Date().toISOString(), ok: true, steps: [] };
@@ -1021,6 +1059,7 @@ function autoDeploy_(force) {
         if (k === 'firestore') deployRules_('firestore.rules', 'cloud.firestore');
         if (k === 'storage') deployRules_('storage.rules', 'firebase.storage/' + STORAGE_BUCKET);
         if (k === 'script') out.scopesNeeded = deployScript_(want.script);
+        if (k === 'indexes') out.indexes = deployIndexes_();
         done[k] = Number(want[k]); props.setProperty('deploy_done', JSON.stringify(done));
         out.steps.push(k + ' ✓ ' + want[k]);
       } catch (e) { out.ok = false; out.steps.push(k + ' ✗ ' + (e && e.message || e)); }
@@ -1067,6 +1106,19 @@ function deployRules_(file, release) {
   const rs = gApi_('post', base + '/rulesets', { source: { files: [{ name: file, content: ghText_(file) }] } }, true);
   const name = 'projects/' + PROJECT_ID + '/releases/' + release;
   gApi_('patch', base + '/releases/' + release, { release: { name: name, rulesetName: rs.name } }, true);
+}
+
+// بيعمل فهارس Firestore المطلوبة (firestore.indexes.json) — اللي موجود بيتساب زي ما هو
+// (قفل الفروع بيحتاجها عشان استعلامات موظف الفرع تبقى سريعة؛ لحد ما تخلص السيستم بيشتغل برضه بطريقة أبطأ)
+function deployIndexes_() {
+  const list = JSON.parse(ghText_('firestore.indexes.json')).indexes || [];
+  const base = 'https://firestore.googleapis.com/v1/projects/' + PROJECT_ID + '/databases/(default)/collectionGroups/';
+  let made = 0, had = 0;
+  list.forEach(ix => {
+    try { gApi_('post', base + ix.collectionGroup + '/indexes', { queryScope: ix.queryScope || 'COLLECTION', fields: ix.fields }, true); made++; }
+    catch (e) { if (/already exists|ALREADY_EXISTS/i.test(String(e && e.message || e))) had++; else throw e; }
+  });
+  return made + ' جديد، ' + had + ' موجود';
 }
 
 // بيحدّث كود السكريبت نفسه، ويعمل نسخة جديدة، ويحدّث رابط الـ Web app (نفس الرابط ميتغيرش)

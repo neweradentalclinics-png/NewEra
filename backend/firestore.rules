@@ -29,6 +29,15 @@ service cloud.firestore {
 
     function appDoc(id) { return /databases/$(database)/documents/appointments/$(id); }
 
+    // ===== قفل الفروع (v4.6): موظف الفرع (employee) يشوف ويكتب في فروعه بس =====
+    // الفروع متسجلة في staff_auth.brs (الأدمن بس يقدر يعدّلها). لو فاضية = مش مقفول (زي الأول).
+    function myBrs() { return get(staffDoc()).data.get('brs', []); }
+    function scoped() { return isStaffUser() && staffRole() == 'employee' && myBrs().size() > 0; }
+    function brOk(d) { return !scoped() || d.get('branchId', '') in myBrs(); }
+    function brR() { return brOk(resource.data); }
+    function brW() { return brOk(request.resource.data); }
+    function brRW() { return brOk(resource.data) && brOk(request.resource.data); }
+
     // ===== الإعدادات: القراءة للكل (قوالب + إعدادات الموقع) والكتابة للأدمن =====
     match /settings/{doc} {
       allow read: if true;
@@ -60,8 +69,11 @@ service cloud.firestore {
 
     // ----- الحجوزات -----
     match /appointments/{id} {
-      // المكتب: كل الحجوزات
-      allow read, write: if isOffice();
+      // المكتب: كل الحجوزات (موظف الفرع: حجوزات فروعه بس)
+      allow read: if isOffice() && brR();
+      allow create: if isOffice() && brW();
+      allow update: if isOffice() && brRW();
+      allow delete: if isOffice() && brR();
       // الطبيب: حجوزاته هو بس، ويغيّر الحالة بس
       allow read: if isDoctor() && resource.data.doctorId == myStaffId();
       allow update: if isDoctor() && resource.data.doctorId == myStaffId()
@@ -192,6 +204,11 @@ service cloud.firestore {
     match /staff_members/{id} {
       // مفيهاش أكواد خلاص، فينفع كل الموظفين يقروها (أسماء الدكاترة والفروع)
       allow read: if isStaff();
+      // الدكتور يحدد خدماته ومدتها، وأي موظف يختار لغته وشكل السيستم (ليلي/نهاري)
+      allow update: if isStaffUser() && id == myStaffId()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lang', 'theme']);
+      allow update: if isDoctor() && id == myStaffId()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['svc', 'svcAt', 'lang', 'theme']);
       allow create: if isAdmin() && (request.resource.data.role != 'superadmin' || isSuper());
       allow update: if isSuper() || (isAdmin() && resource.data.role != 'superadmin' && request.resource.data.role != 'superadmin');
       allow delete: if isAdmin() && resource.data.role != 'superadmin';
@@ -202,23 +219,134 @@ service cloud.firestore {
     }
 
     // ----- سجل المتابعات (اللي كنسل/أجّل + اللي بنضيفهم يدوي): المكتب بس -----
-    match /followups/{id} { allow read, write: if isOffice(); }
+    match /followups/{id} {
+      allow read: if isOffice() && brR();
+      allow create: if isOffice() && brW();
+      allow update: if isOffice() && brRW();
+      allow delete: if isOffice() && brR();
+    }
 
     // ----- المرضى: المكتب كله، والطبيب يشوف حالاته بس -----
     match /patients/{id} {
       allow read, write: if isOffice();
-      allow read: if isDoctor() && resource.data.doctorId == myStaffId();
+      allow read: if isDoctor() && (resource.data.doctorId == myStaffId() || myStaffId() in resource.data.get('doctorIds', []) || emergencyOk(id));
+
+      // ===== السجل الطبي (v4.6): التاريخ المرضي، رسم الأسنان، الزيارات، الخطط، الموافقات، الملفات =====
+      // الإدارة + الدكتور المسؤول (doctorId/doctorIds) + وصول طارئ للدكتور (لحد آخر اليوم وبيوصل تنبيه للإدارة)
+      // + التمريض/الاستقبال: يقروا ملف مريض النهارده في فرعهم بس (patient.visit) — والاستقبال يسجّل كونسنت وملفات
+      match /{sub}/{doc} {
+        allow read: if sub in ['med', 'chart', 'visits', 'plans', 'consents', 'files'] && (medDoc(id) || visitToday(id) || (sub in ['consents', 'files'] && isOffice() && resource.data.get('recordedById', '') == myStaffId()));
+        allow create, update: if sub in ['med', 'chart', 'visits', 'plans', 'consents', 'files'] && (medDoc(id)
+          || (sub in ['consents', 'files'] && isOffice() && request.resource.data.get('recordedById', '') == myStaffId() && (resource == null || resource.data.get('recordedById', '') == myStaffId())));
+        allow delete: if sub in ['med', 'chart', 'visits', 'plans', 'consents', 'files'] && isAdmin();
+      }
+      match /emergency/{uid} {
+        allow read: if isAdmin() || (request.auth != null && request.auth.uid == uid);
+        allow create, update: if isDoctor() && request.auth.uid == uid
+          && request.resource.data.until is timestamp && request.resource.data.until < request.time + duration.value(1, 'd')
+          && request.resource.data.reason is string && request.resource.data.reason.size() >= 5
+          && request.resource.data.alertId is string
+          && getAfter(/databases/$(database)/documents/alerts/$(request.resource.data.alertId)).data.staffId == myStaffId();
+      }
+    }
+    function emergencyOk(id) {
+      return exists(/databases/$(database)/documents/patients/$(id)/emergency/$(request.auth.uid)) && get(/databases/$(database)/documents/patients/$(id)/emergency/$(request.auth.uid)).data.until > request.time;
+    }
+    // متابعة بعد العلاج: الاستقبال بيكلّم المريض، والدكتور بيشوف بتاعه
+    match /aftercare/{id} {
+      allow read: if isOffice() || (isDoctor() && resource.data.doctorId == myStaffId());
+      allow create: if isStaff();
+      allow update: if isOffice();
+      allow delete: if isAdmin();
+    }
+    function patientDoc(id) { return get(/databases/$(database)/documents/patients/$(id)).data; }
+    function medDoc(id) {
+      return isAdmin() || (isDoctor() && (patientDoc(id).get('doctorId', '') == myStaffId() || myStaffId() in patientDoc(id).get('doctorIds', []) || emergencyOk(id)));
+    }
+    function visitToday(id) {
+      return isOffice() && patientDoc(id).get('visit', null) != null
+        && patientDoc(id).visit.from <= request.time.toMillis() && request.time.toMillis() < patientDoc(id).visit.to
+        && brOk({ 'branchId': patientDoc(id).visit.get('branchId', '') });
+    }
+    // تنبيهات الأمان للإدارة (وصول طارئ لملف مريض)
+    match /alerts/{id} {
+      allow read, update: if isAdmin();
+      allow create: if isDoctor() && request.resource.data.staffId == myStaffId() && request.resource.data.kind == 'emergency';
+    }
+
+    // ===== سجل التعديلات 🕓 (v4.6): الكل بيكتب (باسمه هو بس)، الإدارة بس تقرا، ومحدش يعدّل أو يمسح =====
+    match /audit/{id} {
+      allow read: if isAdmin();
+      allow create: if ((isStaffUser() && request.resource.data.byId == myStaffId()) || (isOwner() && !isStaffUser() && request.resource.data.byId == 'owner'))
+        && request.resource.data.keys().hasOnly(['at', 'byId', 'byName', 'action', 'col', 'docId', 'label', 'branchId', 'changes'])
+        && request.resource.data.col in ['appointments', 'payments', 'dues', 'staff_members', 'staff_comp', 'pt_charges', 'pt_payments', 'cash_moves', 'expenses', 'payouts'];
+      allow update, delete: if false;
+    }
+    // ===== الموظفين (v4.6): قواعد النسب والمرتبات + الكراسي والغرف + قوالب الإجراءات والموافقات =====
+    match /staff_comp/{id} {
+      allow read: if isAdmin() || (isStaffUser() && (id == myStaffId() || (id == '_default' && isDoctor())));
+      allow write: if isAdmin();
+    }
+    match /rooms/{id} { allow read: if isStaff(); allow write: if isAdmin(); }
+    match /proc_templates/{id} { allow read: if isStaff(); allow write: if isAdmin(); }
+    match /consent_templates/{id} { allow read: if isStaff(); allow write: if isAdmin(); }
+    // ===== الفلوس (v4.6): حسابات المرضى والأقساط والمصروفات والخزنة ومستحقات الدكاترة =====
+    // بنود حساب المريض: بتنزل من خطة العلاج (الدكتور) أو يدوي (المكتب)
+    match /pt_charges/{id} {
+      allow read: if (isOffice() && brR()) || (isDoctor() && resource.data.doctorId == myStaffId());
+      allow create, update: if (isOffice() && brW()) || (isDoctor() && request.resource.data.doctorId == myStaffId() && (resource == null || resource.data.doctorId == myStaffId()));
+      allow delete: if isAdmin();
+    }
+    // الدفعات: المكتب يسجّل (باسمه) ويشوف فرعه، الدكتور يشوف دفعات مرضاه، والتعديل/الإلغاء للإدارة بس
+    match /pt_payments/{id} {
+      allow read: if (isOffice() && brR()) || (isDoctor() && resource.data.doctorId == myStaffId());
+      allow create: if isOffice() && brW() && request.resource.data.recordedById == myStaffId() && request.resource.data.amount is number && request.resource.data.amount > 0;
+      allow update, delete: if isAdmin();
+    }
+    match /pt_installments/{id} {
+      allow read: if isOffice() && brR();
+      allow create: if isOffice() && brW();
+      allow update: if isOffice() && brRW();
+      allow delete: if isAdmin();
+    }
+    match /expenses/{id} {
+      allow read: if isOffice() && brR();
+      allow create: if isOffice() && brW() && request.resource.data.amount is number;
+      allow update, delete: if isAdmin();
+    }
+    match /cash_moves/{id} {
+      allow read: if isOffice() && brR();
+      allow create: if isOffice() && brW() && request.resource.data.recordedById == myStaffId();
+      allow update, delete: if isAdmin();
+    }
+    // اللي اتصرف للدكاترة: الإدارة بس، والدكتور يشوف بتاعه
+    match /payouts/{id} {
+      allow read: if isAdmin() || (isDoctor() && resource.data.doctorId == myStaffId());
+      allow write: if isAdmin();
+    }
+    // ===== قايمة الانتظار (v4.6) =====
+    match /waitlist/{id} {
+      allow read: if isOffice() && brR();
+      allow create: if isOffice() && brW();
+      allow update: if isOffice() && brRW();
+      allow delete: if isAdmin();
     }
 
     // ----- المعامل: كل الموظفين (الطبيب بيضيف ويعدل حالات) -----
-    match /lab_cases/{id}   { allow read, write: if isStaff(); }
+    match /lab_cases/{id} {
+      allow read: if isStaff() && brR();
+      allow create: if isStaff() && brW();
+      allow update: if isStaff() && brRW();
+      allow delete: if isStaff() && brR();
+    }
 
     // ----- الفلوس والمخزن: المكتب بس (الأطباء لأ) -----
     // التوريد: السكرتارية تقدر تعدّل بس كل تعديل لازم يتسجل في سجل التعديلات (editLog) — والمسلَّم للإدارة مايتعدلش
     match /payments/{id} {
-      allow read, create: if isOffice();
-      allow delete: if isAdmin() || (isOffice() && resource.data.get('delivered', false) == false);
-      allow update: if isAdmin() || (isOffice()
+      allow read: if isOffice() && brR();
+      allow create: if isOffice() && brW();
+      allow delete: if isAdmin() || (isOffice() && brR() && resource.data.get('delivered', false) == false);
+      allow update: if isAdmin() || (isOffice() && brRW()
         && resource.data.get('delivered', false) == false
         && request.resource.data.get('editLog', []).size() == resource.data.get('editLog', []).size() + 1
         && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['delivered', 'zeroed', 'deliveredAt', 'recordedBy', 'recordedById', 'createdDay', 'createdAt']));
@@ -239,7 +367,8 @@ service cloud.firestore {
     // المهام: الإدارة والدكاترة بيبعتوها، والسكرتارية/التمريض تشوف مهامها وتعلّم إنها خلصت بس
     match /tasks/{id} {
       allow read: if isAdmin() || (isStaffUser() && (resource.data.assignees.hasAny([myStaffId()]) || resource.data.createdById == myStaffId()));
-      allow create: if isAdmin() || (isDoctor() && request.resource.data.createdById == myStaffId());
+      allow create: if isAdmin() || (isDoctor() && request.resource.data.createdById == myStaffId())
+        || (isOffice() && request.resource.data.get('kind', '') == 'aftercare' && request.resource.data.createdById == myStaffId());
       allow delete: if isAdmin() || (isDoctor() && resource.data.createdById == myStaffId());
       allow update: if isAdmin() || (isDoctor() && resource.data.createdById == myStaffId())
         || (isStaffUser() && resource.data.assignees.hasAny([myStaffId()])
@@ -259,7 +388,12 @@ service cloud.firestore {
       allow create: if isAdmin() || (isDoctor() && request.resource.data.doctorId == myStaffId());
     }
     match /inv_invoices/{id} { allow read: if isOffice(); allow write: if isAdmin(); }
-    match /dues/{id}        { allow read, write: if isOffice(); }
+    match /dues/{id} {
+      allow read: if isOffice() && brR();
+      allow create: if isOffice() && brW();
+      allow update: if isOffice() && brRW();
+      allow delete: if isOffice() && brR();
+    }
     match /lab_costs/{id}   { allow read, write: if isSuper(); }
     // سجل الإشعارات اليومية (عشان ملخص الصبح يتبعت مرة واحدة بس)
     match /tg_log/{id}      { allow read, create: if isOffice(); }
@@ -268,7 +402,8 @@ service cloud.firestore {
     match /{col}/{doc=**} {
       allow read, write: if isOwner() && !(col in [
         'settings','private_config','specialties','services','consults','faqs','appointments','online_bookings','booked_slots','public_doctors','branches','phone_book',
-        'staff_auth','staff_members','staff_codes','patients','payments','shortages','lab_cases','consumables','dues','lab_costs','tg_log','trash','followups','shortage_hist','inv_items','inv_counts','inv_tools','inv_invoices','case_logs','case_files','tasks'
+        'staff_auth','staff_members','staff_codes','patients','payments','shortages','lab_cases','consumables','dues','lab_costs','tg_log','trash','followups','shortage_hist','inv_items','inv_counts','inv_tools','inv_invoices','case_logs','case_files','tasks',
+        'audit','alerts','staff_comp','rooms','proc_templates','consent_templates','waitlist','aftercare','pt_charges','pt_payments','pt_installments','expenses','cash_moves','payouts'
       ]);
     }
   }
