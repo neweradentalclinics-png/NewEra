@@ -714,7 +714,25 @@ function doPost(e) {
     if (req.action === 'ai') return json_(aiTool_(req));
     if (req.action === 'ping') { authAdmin_(req.idToken); const c = aiCfg_(); return json_({ ok: true, ai: !!c.key, provider: c.provider, model: c.model }); }
     return json_({ ok: false, error: 'طلب مش معروف' });
-  } catch (err) { return json_({ ok: false, error: String(err && err.message || err) }); }
+  } catch (err) {
+    const m = String(err && err.message || err);
+    if (/Firestore 429|RESOURCE_EXHAUSTED|Quota exceeded/i.test(m)) return json_({ ok: false, error: 'قاعدة البيانات خلّصت حد القراءة المجاني بتاع النهارده (بيرجع الساعة 10 الصبح تقريباً) — جربي تاني بعدها' });
+    return json_({ ok: false, error: m });
+  }
+}
+// قراية مستند مع كاش (10 دقايق) + آخر نسخة معروفة: عشان المساعد وقراءة الفواتير يشتغلوا حتى لو حد القراءة اليومي خلص
+function cget_(path, ttl) {
+  const c = CacheService.getScriptCache(), k = 'g:' + path, h = c.get(k);
+  if (h) return JSON.parse(h);
+  const props = PropertiesService.getScriptProperties();
+  try {
+    const v = get_(path), s = JSON.stringify(v);
+    try { c.put(k, s, ttl || 600); props.setProperty('lk:' + path, s); } catch (e) {}
+    return v;
+  } catch (e) {
+    if (e.status === 429) { const old = props.getProperty('lk:' + path); if (old) return JSON.parse(old); }
+    throw e;
+  }
 }
 function json_(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }
 
@@ -726,7 +744,7 @@ function authUser_(idToken) {
   const u = (JSON.parse(r.getContentText()).users || [])[0];
   if (!u) throw new Error('الحساب مش موجود');
   if (u.email === OWNER_EMAIL) return { role: 'superadmin', name: 'الإدارة', staffId: '' };
-  const sa = get_('staff_auth/' + u.localId);
+  const sa = cget_('staff_auth/' + u.localId);
   if (!sa || !sa.role) throw new Error('الحساب ده مش متسجل في السيستم');
   return sa;
 }
@@ -778,13 +796,13 @@ function authAdmin_(idToken) {
   const u = (JSON.parse(r.getContentText()).users || [])[0];
   if (!u) throw new Error('الحساب مش موجود');
   if (u.email === OWNER_EMAIL) return { role: 'superadmin', name: 'الإدارة' };
-  const sa = get_('staff_auth/' + u.localId);
+  const sa = cget_('staff_auth/' + u.localId);
   if (!sa || ['admin', 'superadmin'].indexOf(sa.role) < 0) throw new Error('قراءة الفواتير للأدمن بس');
   return sa;
 }
 
 function aiCfg_() {
-  const d = get_('private_config/ai') || {}, key = String(d.key || '').trim();
+  const d = cget_('private_config/ai') || {}, key = String(d.key || '').trim();
   const provider = /^sk-ant-/.test(key) ? 'claude' : 'gemini';
   return { key: key, provider: provider, model: String(d.model || '').trim() || AI_DEFAULT_MODEL[provider] };
 }
@@ -1067,7 +1085,7 @@ function createOnce_(path) {
 
 /* ================= النشر التلقائي من GitHub ================= */
 // رقم نسخة الملف ده (بيزيد مع كل تعديل) — بيبان في doGet عشان نتأكد إن آخر نسخة اشتغلت
-const CODE_REV = 9;
+const CODE_REV = 10;
 const GH_RAW = 'https://raw.githubusercontent.com/neweradentalclinics-png/NewEra/main/backend/';
 const STORAGE_BUCKET = 'new-era-dental-center.firebasestorage.app';
 
