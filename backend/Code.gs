@@ -1067,7 +1067,7 @@ function createOnce_(path) {
 
 /* ================= النشر التلقائي من GitHub ================= */
 // رقم نسخة الملف ده (بيزيد مع كل تعديل) — بيبان في doGet عشان نتأكد إن آخر نسخة اشتغلت
-const CODE_REV = 7;
+const CODE_REV = 8;
 const GH_RAW = 'https://raw.githubusercontent.com/neweradentalclinics-png/NewEra/main/backend/';
 const STORAGE_BUCKET = 'new-era-dental-center.firebasestorage.app';
 
@@ -1131,7 +1131,9 @@ function gApi_(method, url, body, billProject) {
   let j = {}; try { j = t ? JSON.parse(t) : {}; } catch (e) {}
   if (r.getResponseCode() >= 300) {
     const m = (j.error && j.error.message) || ('HTTP ' + r.getResponseCode());
-    if (/Apps Script API|has not enabled/i.test(m)) throw new Error('لازم تفعّلي Google Apps Script API من https://script.google.com/home/usersettings');
+    // نوضّح الخطأ الحقيقي (كان بيتخبّى ورا رسالة "فعّلي Apps Script API" حتى لو هي مفعّلة)
+    if (/User has not enabled the Apps Script API/i.test(m)) throw new Error('لازم تفعّلي Google Apps Script API من https://script.google.com/home/usersettings (ولو مفعّلة استني 10 دقايق) — ' + m.slice(0, 160));
+    if (/Apps Script API has not been used|SERVICE_DISABLED/i.test(m)) throw new Error('Apps Script API مش مفعّلة في مشروع جوجل كلاود بتاع السكريبت — ' + m.slice(0, 220));
     throw new Error(m);
   }
   return j;
