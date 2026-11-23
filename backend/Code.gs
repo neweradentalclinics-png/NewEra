@@ -910,30 +910,59 @@ function aiTool_(req) {
   return { ok: true, data: data, provider: c.provider };
 }
 
+// v4.7 — لو جوجل/أنثروبيك مضغوطين (503/500/529): يعيد المحاولة لوحده، ولو فضل واقف يحوّل على موديل أخف
+const AI_BUSY = [500, 502, 503, 504, 529];
+const GEMINI_FALLBACKS = ['gemini-flash-latest', 'gemini-flash-lite-latest'];
+const AI_BUSY_MSG = 'المساعد مشغول دلوقتي (ضغط على سيرفرات الذكاء الاصطناعي) — جربوا تاني كمان شوية';
+
+// بيبعت الطلب ولو الرد "مشغول" بيستنى ويعيد (3 محاولات: فورا، بعد 1.5 ثانية، بعد 3 ثواني)
+function aiFetch_(url, opts) {
+  let r;
+  for (let i = 0; i < 3; i++) {
+    if (i) Utilities.sleep(1500 * i);
+    r = UrlFetchApp.fetch(url, opts);
+    if (AI_BUSY.indexOf(r.getResponseCode()) < 0) return r;
+  }
+  return r;
+}
+
 function askGemini_(c, prompt, imgs) {
   const parts = [{ text: prompt }].concat(imgs.map(i => ({ inline_data: { mime_type: i.mime || 'image/jpeg', data: i.data } })));
-  const r = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(c.model) + ':generateContent', {
-    method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: { 'x-goog-api-key': c.key },
-    payload: JSON.stringify({ contents: [{ role: 'user', parts: parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json' } })
-  });
-  const code = r.getResponseCode(), j = JSON.parse(r.getContentText() || '{}');
-  if (code !== 200) throw new Error(aiErr_('Gemini', code, j.error && j.error.message));
-  const cand = (j.candidates || [])[0];
-  return ((cand && cand.content && cand.content.parts) || []).map(p => p.text || '').join('');
+  const body = JSON.stringify({ contents: [{ role: 'user', parts: parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json' } });
+  const models = [c.model].concat(GEMINI_FALLBACKS.filter(m => m !== c.model));
+  let lastErr = null;
+  for (let k = 0; k < models.length; k++) {
+    const r = aiFetch_('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(models[k]) + ':generateContent', {
+      method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: { 'x-goog-api-key': c.key }, payload: body
+    });
+    const code = r.getResponseCode();
+    let j = {}; try { j = JSON.parse(r.getContentText() || '{}'); } catch (e) {}
+    if (code === 200) {
+      const cand = (j.candidates || [])[0];
+      return ((cand && cand.content && cand.content.parts) || []).map(p => p.text || '').join('');
+    }
+    // الموديل الأساسي مشغول ← جرّب اللي بعده. أي خطأ تاني (مفتاح غلط، حد الاستخدام...) يتقال على طول
+    const busy = AI_BUSY.indexOf(code) >= 0, missingFallback = k > 0 && code === 404;
+    if (!busy && !missingFallback) throw new Error(aiErr_('Gemini', code, j.error && j.error.message));
+    if (busy) lastErr = AI_BUSY_MSG;
+  }
+  throw new Error(lastErr || AI_BUSY_MSG);
 }
 
 function askClaude_(c, prompt, imgs, maxTok) {
   const content = imgs.map(i => ({ type: 'image', source: { type: 'base64', media_type: i.mime || 'image/jpeg', data: i.data } })).concat([{ type: 'text', text: prompt }]);
-  const r = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
+  const r = aiFetch_('https://api.anthropic.com/v1/messages', {
     method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: { 'x-api-key': c.key, 'anthropic-version': '2023-06-01' },
     payload: JSON.stringify({ model: c.model, max_tokens: maxTok || 4096, temperature: maxTok ? 0.4 : 0, messages: [{ role: 'user', content: content }] })
   });
-  const code = r.getResponseCode(), j = JSON.parse(r.getContentText() || '{}');
+  const code = r.getResponseCode();
+  let j = {}; try { j = JSON.parse(r.getContentText() || '{}'); } catch (e) {}
   if (code !== 200) throw new Error(aiErr_('Claude', code, j.error && j.error.message));
   return (j.content || []).map(p => p.text || '').join('');
 }
 
 function aiErr_(who, code, msg) {
+  if (AI_BUSY.indexOf(code) >= 0) return AI_BUSY_MSG;
   if (code === 401 || code === 403) return 'مفتاح ' + who + ' مش شغال — اتأكدي إنه متنسخ صح';
   if (code === 429) return who + ': عدد الطلبات كتير أو الرصيد خلص — استني دقيقة وجربي تاني';
   if (code === 404) return who + ': اسم الموديل مش موجود (' + (msg || '') + ') — غيّريه من الإعداد أو سيبيه فاضي';
@@ -1038,7 +1067,7 @@ function createOnce_(path) {
 
 /* ================= النشر التلقائي من GitHub ================= */
 // رقم نسخة الملف ده (بيزيد مع كل تعديل) — بيبان في doGet عشان نتأكد إن آخر نسخة اشتغلت
-const CODE_REV = 6;
+const CODE_REV = 7;
 const GH_RAW = 'https://raw.githubusercontent.com/neweradentalclinics-png/NewEra/main/backend/';
 const STORAGE_BUCKET = 'new-era-dental-center.firebasestorage.app';
 
