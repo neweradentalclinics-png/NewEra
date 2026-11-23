@@ -1067,7 +1067,7 @@ function createOnce_(path) {
 
 /* ================= النشر التلقائي من GitHub ================= */
 // رقم نسخة الملف ده (بيزيد مع كل تعديل) — بيبان في doGet عشان نتأكد إن آخر نسخة اشتغلت
-const CODE_REV = 8;
+const CODE_REV = 9;
 const GH_RAW = 'https://raw.githubusercontent.com/neweradentalclinics-png/NewEra/main/backend/';
 const STORAGE_BUCKET = 'new-era-dental-center.firebasestorage.app';
 
@@ -1163,10 +1163,11 @@ function deployIndexes_() {
 
 // بيحدّث كود السكريبت نفسه، ويعمل نسخة جديدة، ويحدّث رابط الـ Web app (نفس الرابط ميتغيرش)
 function deployScript_(rev) {
+  // بنستخدم مشروع جوجل كلاود بتاع العيادة (Apps Script API مفعّلة فيه) — المشروع الافتراضي للسكريبت مقفول ومينفعش نفعّل فيه حاجة
   const id = ScriptApp.getScriptId(), api = 'https://script.googleapis.com/v1/projects/' + id;
   const code = ghText_('Code.gs'), man = ghText_('appsscript.json');
   const newMan = JSON.parse(man);
-  const cur = gApi_('get', api + '/content');
+  const cur = gApi_('get', api + '/content', null, true);
   const files = cur.files || [];
   const curMan = files.filter(f => f.name === 'appsscript')[0];
   const oldScopes = curMan ? (JSON.parse(curMan.source).oauthScopes || []) : [];
@@ -1175,12 +1176,12 @@ function deployScript_(rev) {
   const codeName = js.length === 1 ? js[0].name : 'Code';
   const keep = files.filter(f => f.name !== 'appsscript' && !(f.type === 'SERVER_JS' && f.name === codeName));
   keep.push({ name: 'appsscript', type: 'JSON', source: man }, { name: codeName, type: 'SERVER_JS', source: code });
-  gApi_('put', api + '/content', { scriptId: id, files: keep });
-  const v = gApi_('post', api + '/versions', { description: 'GitHub #' + rev });
-  (gApi_('get', api + '/deployments').deployments || []).forEach(d => {
+  gApi_('put', api + '/content', { scriptId: id, files: keep }, true);
+  const v = gApi_('post', api + '/versions', { description: 'GitHub #' + rev }, true);
+  (gApi_('get', api + '/deployments', null, true).deployments || []).forEach(d => {
     const c = d.deploymentConfig || {};
     if (!c.versionNumber || !(d.entryPoints || []).some(e => e.entryPointType === 'WEB_APP')) return;
-    gApi_('put', api + '/deployments/' + d.deploymentId, { deploymentConfig: { scriptId: id, versionNumber: v.versionNumber, manifestFileName: 'appsscript', description: c.description || ('GitHub #' + rev) } });
+    gApi_('put', api + '/deployments/' + d.deploymentId, { deploymentConfig: { scriptId: id, versionNumber: v.versionNumber, manifestFileName: 'appsscript', description: c.description || ('GitHub #' + rev) } }, true);
   });
   return scopesNeeded;
 }
