@@ -1038,7 +1038,7 @@ function createOnce_(path) {
 
 /* ================= النشر التلقائي من GitHub ================= */
 // رقم نسخة الملف ده (بيزيد مع كل تعديل) — بيبان في doGet عشان نتأكد إن آخر نسخة اشتغلت
-const CODE_REV = 5;
+const CODE_REV = 6;
 const GH_RAW = 'https://raw.githubusercontent.com/neweradentalclinics-png/NewEra/main/backend/';
 const STORAGE_BUCKET = 'new-era-dental-center.firebasestorage.app';
 
@@ -1113,7 +1113,8 @@ function deployRules_(file, release) {
   const base = 'https://firebaserules.googleapis.com/v1/projects/' + PROJECT_ID;
   const rs = gApi_('post', base + '/rulesets', { source: { files: [{ name: file, content: ghText_(file) }] } }, true);
   const name = 'projects/' + PROJECT_ID + '/releases/' + release;
-  gApi_('patch', base + '/releases/' + release, { release: { name: name, rulesetName: rs.name } }, true);
+  try { gApi_('patch', base + '/releases/' + release, { release: { name: name, rulesetName: rs.name } }, true); }
+  catch (e) { if (!/not found|NOT_FOUND/i.test(String(e && e.message || e))) throw e; gApi_('post', base + '/releases', { name: name, rulesetName: rs.name }, true); } // أول نشر: الـ release لسه مش موجود
 }
 
 // بيعمل فهارس Firestore المطلوبة (firestore.indexes.json) — اللي موجود بيتساب زي ما هو
