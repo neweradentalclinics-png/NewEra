@@ -53,7 +53,9 @@ service cloud.firestore {
 
     // ===== بيانات حجز المريض (صفحة الحجز + الموقع) =====
     function validOnline(d) {
-      return d.patientName is string && d.patientName.size() > 0 && d.patientName.size() <= 100
+      // attrib = مصدر الحجز (حملة ميتا/جوجل/الموقع/واتساب) — اختياري
+      return (!('attrib' in d) || (d.attrib is map && d.attrib.size() <= 14))
+        && d.patientName is string && d.patientName.size() > 0 && d.patientName.size() <= 100
         && d.phone is string && d.phone.size() > 0 && d.phone.size() <= 30
         && d.branchId is string && d.branchId.size() > 0 && d.branchId.size() <= 40
         && d.doctorId is string && d.doctorId.size() > 0 && d.doctorId.size() <= 40
@@ -81,7 +83,7 @@ service cloud.firestore {
 
       // المريض: يفتح/يعدل/يلغي حجزه الأونلاين بس (برقم المستند اللي بيوصله من كود الحجز)
       allow get: if resource.data.source == 'online';
-      allow create: if request.resource.data.keys().hasOnly(['patientName','phone','branchId','doctorId','doctorName','service','serviceIds','estimate','extra','needsSchedule','date','time','bookingCode','source','status','createdAt','phoneKey','pbTok'])
+      allow create: if request.resource.data.keys().hasOnly(['patientName','phone','branchId','doctorId','doctorName','service','serviceIds','estimate','extra','needsSchedule','date','time','bookingCode','source','status','createdAt','phoneKey','pbTok','attrib'])
         // حد الحجوزات لكل رقم: الحجز لازم يكون متسجل في phone_book بتاع نفس الرقم (اللي مبيقبلش أكتر من 2)
         && request.resource.data.phoneKey is string && request.resource.data.phoneKey.matches('^[0-9]{10}$')
         && request.resource.data.phone.matches('^[+]?[0-9]*' + request.resource.data.phoneKey + '$')
