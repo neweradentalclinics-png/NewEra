@@ -20,9 +20,15 @@ service cloud.firestore {
     function staffRole() { return get(staffDoc()).data.role; }
     function myStaffId() { return get(staffDoc()).data.staffId; }
 
-    function isStaff()  { return isOwner() || isStaffUser(); }
+    // أمين المخزن: بيدخل أداة المخزن (inventory.html) بس — مالوش أي حاجة في السيستم
+    function isKeeper() { return isStaffUser() && staffRole() == 'storekeeper'; }
+    function isClinicUser() { return isStaffUser() && staffRole() != 'storekeeper'; }
+    function isStaff()  { return isOwner() || isClinicUser(); }
     // موظفين المكتب (سكرتارية/تمريض/مدير/سوبر) = كل الموظفين ما عدا الأطباء
-    function isOffice() { return isOwner() || (isStaffUser() && staffRole() != 'doctor'); }
+    function isOffice() { return isOwner() || (isClinicUser() && staffRole() != 'doctor'); }
+    // المخزن: المكتب + أمين المخزن
+    function isStock()  { return isOffice() || isKeeper(); }
+    function canStock() { return isAdmin() || isKeeper(); }
     function isDoctor() { return isStaffUser() && staffRole() == 'doctor'; }
     function isAdmin()  { return isOwner() || (isStaffUser() && (staffRole() == 'admin' || staffRole() == 'superadmin')); }
     function isSuper()  { return isOwner() || (isStaffUser() && staffRole() == 'superadmin'); }
@@ -181,7 +187,7 @@ service cloud.firestore {
 
     // ----- سلة المحذوفات: أي موظف بيمسح حاجة بتتنقل هنا، والأدمن بس يشوفها ويرجّعها -----
     match /trash/{id} {
-      allow create: if isStaff()
+      allow create: if (isStaff() || (isKeeper() && request.resource.data.col in ['inv_items','inv_tools','shortages']))
         && request.resource.data.keys().hasOnly(['col','docId','data','title','branchId','deletedAt','deletedBy'])
         && request.resource.data.col is string && request.resource.data.docId is string
         && request.resource.data.data is map && request.resource.data.deletedAt is string;
@@ -353,19 +359,24 @@ service cloud.firestore {
         && request.resource.data.get('editLog', []).size() == resource.data.get('editLog', []).size() + 1
         && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['delivered', 'zeroed', 'deliveredAt', 'recordedBy', 'recordedById', 'createdDay', 'createdAt']));
     }
-    match /shortages/{id}   { allow read, write: if isOffice(); }
+    match /shortages/{id}   { allow read, write: if isStock(); }
     // المستهلكات: السكرتارية تشوف وتسجّل بس — التعديل والمسح للأدمن
-    match /consumables/{id} { allow read, create: if isOffice(); allow update, delete: if isAdmin(); }
+    match /consumables/{id} { allow read, create: if isStock(); allow update, delete: if isAdmin(); }
     // تاريخ طلب النواقص (آخر مرة كل صنف اتطلب)
-    match /shortage_hist/{id} { allow read, write: if isOffice(); }
+    match /shortage_hist/{id} { allow read, write: if isStock(); }
     // المخزن والجرد
     match /inv_items/{id} {
-      allow read: if isOffice();
-      allow create, delete: if isAdmin();
-      allow update: if isAdmin() || (isOffice() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stock','lastMoveAt']));
+      allow read: if isStock();
+      allow create, delete: if canStock();
+      allow update: if canStock() || (isOffice() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stock','lastMoveAt']));
     }
-    match /inv_counts/{id} { allow read: if isOffice(); allow write: if isAdmin(); }
-    match /inv_tools/{id} { allow read: if isOffice(); allow write: if isAdmin(); }
+    match /inv_counts/{id} { allow read: if isStock(); allow write: if canStock(); }
+    match /inv_tools/{id} { allow read: if isStock(); allow write: if canStock(); }
+    // حسابات أمناء المخزن: الأدمن بيعملها، وأمين المخزن يقرا حسابه بس
+    match /inv_keepers/{id} {
+      allow read: if isAdmin() || (isKeeper() && myStaffId() == id);
+      allow write: if isAdmin();
+    }
     // المهام: الإدارة والدكاترة بيبعتوها، والسكرتارية/التمريض تشوف مهامها وتعلّم إنها خلصت بس
     match /tasks/{id} {
       allow read: if isAdmin() || (isStaffUser() && (resource.data.assignees.hasAny([myStaffId()]) || resource.data.createdById == myStaffId()));
@@ -389,7 +400,7 @@ service cloud.firestore {
       allow read, delete: if isAdmin() || (isDoctor() && resource.data.doctorId == myStaffId());
       allow create: if isAdmin() || (isDoctor() && request.resource.data.doctorId == myStaffId());
     }
-    match /inv_invoices/{id} { allow read: if isOffice(); allow write: if isAdmin(); }
+    match /inv_invoices/{id} { allow read: if isStock(); allow write: if canStock(); }
     match /dues/{id} {
       allow read: if isOffice() && brR();
       allow create: if isOffice() && brW();
@@ -404,7 +415,7 @@ service cloud.firestore {
     match /{col}/{doc=**} {
       allow read, write: if isOwner() && !(col in [
         'settings','private_config','specialties','services','consults','faqs','appointments','online_bookings','booked_slots','public_doctors','branches','phone_book',
-        'staff_auth','staff_members','staff_codes','patients','payments','shortages','lab_cases','consumables','dues','lab_costs','tg_log','trash','followups','shortage_hist','inv_items','inv_counts','inv_tools','inv_invoices','case_logs','case_files','tasks',
+        'staff_auth','staff_members','staff_codes','patients','payments','shortages','lab_cases','consumables','dues','lab_costs','tg_log','trash','followups','shortage_hist','inv_items','inv_counts','inv_tools','inv_invoices','inv_keepers','case_logs','case_files','tasks',
         'audit','alerts','staff_comp','rooms','proc_templates','consent_templates','waitlist','aftercare','pt_charges','pt_payments','pt_installments','expenses','cash_moves','payouts'
       ]);
     }
