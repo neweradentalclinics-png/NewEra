@@ -287,7 +287,8 @@ service cloud.firestore {
       allow read: if isAdmin();
       allow create: if ((isStaffUser() && request.resource.data.byId == myStaffId()) || (isOwner() && !isStaffUser() && request.resource.data.byId == 'owner'))
         && request.resource.data.keys().hasOnly(['at', 'byId', 'byName', 'action', 'col', 'docId', 'label', 'branchId', 'changes'])
-        && request.resource.data.col in ['appointments', 'payments', 'dues', 'staff_members', 'staff_comp', 'pt_charges', 'pt_payments', 'cash_moves', 'expenses', 'payouts'];
+        && request.resource.data.col in ['appointments', 'payments', 'dues', 'staff_members', 'staff_comp', 'pt_charges', 'pt_payments', 'cash_moves', 'expenses', 'payouts',
+          'inv_items', 'consumables', 'inv_counts', 'inv_tools', 'inv_invoices', 'shortages', 'inv_keepers'];
       allow update, delete: if false;
     }
     // ===== الموظفين (v4.6): قواعد النسب والمرتبات + الكراسي والغرف + قوالب الإجراءات والموافقات =====
