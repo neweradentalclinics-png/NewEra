@@ -47,7 +47,7 @@ service cloud.firestore {
     // ===== الإعدادات: القراءة للكل (قوالب + إعدادات الموقع) والكتابة للأدمن =====
     match /settings/{doc} {
       // inv_ai فيه رابط سكريبت جوجل الداخلي: للموظفين بس (الباقي إعدادات عامة للموقع)
-      allow read: if doc != 'inv_ai' || isStaff();
+      allow read: if doc != 'inv_ai' || isStaff() || isKeeper();
       allow write: if isAdmin();
     }
 
